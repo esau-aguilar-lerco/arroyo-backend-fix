@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>API Arroyo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont;
+            background: #0f172a;
+            color: #e5e7eb;
+            margin: 0;
+            padding: 40px;
+        }
+        h1 {
+            color: #38bdf8;
+        }
+        .card {
+            background: #020617;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        a {
+            color: #22d3ee;
+            text-decoration: none;
+            display: block;
+            margin: 6px 0;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        .badge {
+            background: #22c55e;
+            color: #022c22;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            display: inline-block;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>🚀 API Arroyo</h1>
+    <p class="badge">Backend activo</p>
+
+    <div class="card">
+        <h2>📦 Endpoints</h2>
+        {% for e in endpoints %}
+            <a href="{{ e.url }}" target="_blank">🔗 {{ e.name }} → {{ e.url }}</a>
+        {% endfor %}
+    </div>
+
+    <div class="card">
+        <h2>📘 Documentación</h2>
+        <a href="{{ docs.swagger }}" target="_blank">Swagger UI</a>
+        <a href="{{ docs.redoc }}" target="_blank">Redoc</a>
+        <a href="{{ docs.schema }}" target="_blank">OpenAPI Schema</a>
+    </div>
+
+    <div class="card">
+        <h2>🔐 Autenticación</h2>
+        <a href="/api/token/">Obtener Token</a>
+        <a href="/api/token/refresh/">Refresh Token</a>
+    </div>
+
+</body>
+</html>
