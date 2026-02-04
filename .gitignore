@@ -1,0 +1,15 @@
+venv/
+.venv/
+env/
+ENV/
+bin/
+lib/
+lib64/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+db.sqlite3
+*.sql
+*.dump
