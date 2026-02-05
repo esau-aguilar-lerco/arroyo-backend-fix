@@ -1,4 +1,4 @@
-from django.db import transaction
+from django.db import transaction, DatabaseError
 from django.utils import timezone
 from datetime import timedelta 
 from decimal import Decimal
@@ -66,19 +66,16 @@ class AbastecimientoService:
         return insidencia
     
     @staticmethod
-    def validar_compra(compra_id):
-        """
-        Valida que la compra exista y esté en estado válido
-        """
+    def validar_compra(compra_id, *, lock=False, nowait=False):
+        qs = Compra.objects.filter(id=compra_id, status_model=Compra.STATUS_MODEL_ACTIVE)
+        if lock: # LOCK
+            qs = qs.select_for_update(nowait=nowait)
         try:
-            compra = Compra.objects.get(
-                id=compra_id,
-                status_model=Compra.STATUS_MODEL_ACTIVE
-            )
+            compra = qs.get()
         except Compra.DoesNotExist:
             raise ValueError(f"Compra con ID {compra_id} no encontrada")
 
-        if compra.estado not in [Compra.EN_CAMINO]:
+        if compra.estado != Compra.EN_CAMINO:
             raise ValueError(f"La compra debe estar en estado '{Compra.EN_CAMINO}'. Estado actual: {compra.estado}")
 
         return compra
@@ -113,7 +110,7 @@ class AbastecimientoService:
         if referencia_custom:
             return referencia_custom
 
-        return f"ABAST-{compra.codigo}-{timezone.now().strftime('%Y%m%d%H%M%S')}"
+        return f"ABAST-{compra.codigo}-{timezone.now().strftime('%Y%m%d%H%M%S%f')}" #microsegundos
 
     @staticmethod
     def crear_movimiento_principal(almacen_destino, referencia, nota, user):
@@ -341,40 +338,34 @@ class AbastecimientoService:
     
     @classmethod
     def procesar_abastecimiento_completo(cls, validated_data, user):
-        """
-        Método principal que coordina todo el proceso de abastecimiento
-        """
         compra_id = validated_data['compra']
         items = validated_data['items']
-        referencia = validated_data.get('referencia', '')
+        referencia_custom = validated_data.get('referencia', '')
         nota = validated_data.get('nota', '')
-        
-        # 1. Validar orden de compra
-        compra = cls.validar_compra(compra_id)
-        
-        # 2. Obtener almacén destino
-        compra, almacen_destino = cls.obtener_almacen_destino(compra)
-        # 3. Generar referencia
-        referencia = cls.generar_referencia(compra, referencia)
-        
-        # 4. Crear movimiento principal
-        movimiento_principal = cls.crear_movimiento_principal(almacen_destino, referencia, nota, user)
-        
-        # 5. Procesar items
-        lotes_creados, productos_abastecidos, costo_total_abastecimiento = cls.procesar_items_abastecimiento(
-            items, movimiento_principal, almacen_destino, compra.id, user
-        )
-        cls.procesar_entrada(cls,items, compra_id)
-        
-        # 6. Actualizar movimiento principal
-        cls.actualizar_movimiento_principal(movimiento_principal, items, costo_total_abastecimiento)
-        
-        # 7. Actualizar estados
-        cls.actualizar_estados(compra,  user)
-        
-        # 8. Construir respuesta
-        return cls.construir_respuesta(
-            movimiento_principal, compra, almacen_destino,
-            items, costo_total_abastecimiento, productos_abastecidos,
-            lotes_creados, referencia, nota, user
-        )
+
+        with transaction.atomic():
+            # Lock a la compra
+            try:
+                compra = cls.validar_compra(compra_id, lock=True, nowait=True)
+            except DatabaseError:                
+                raise ValueError("Compra en proceso de abastecimiento, intenta de nuevo")
+
+            compra, almacen_destino = cls.obtener_almacen_destino(compra)
+            referencia = cls.generar_referencia(compra, referencia_custom)
+
+            movimiento_principal = cls.crear_movimiento_principal(almacen_destino, referencia, nota, user)
+
+            lotes_creados, productos_abastecidos, costo_total = cls.procesar_items_abastecimiento(
+                items, movimiento_principal, almacen_destino, compra.id, user
+            )
+            #Línea sospechosa
+            # cls.procesar_entrada(cls, items, compra_id)
+
+            cls.actualizar_movimiento_principal(movimiento_principal, items, costo_total)
+            cls.actualizar_estados(compra, user)
+
+            return cls.construir_respuesta(
+                movimiento_principal, compra, almacen_destino,
+                items, costo_total, productos_abastecidos,
+                lotes_creados, referencia, nota, user
+            )
