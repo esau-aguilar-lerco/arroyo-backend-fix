@@ -127,8 +127,20 @@ class LoteInventario(BaseModel):
         if self.cantidad > 0 and self.status_model != self.STATUS_MODEL_ACTIVE:
             self.status_model = self.STATUS_MODEL_ACTIVE
         # Por ejemplo, podrías validar o modificar campos antes de guardar
-        if not self.fecha_vencimiento :
-            self.fecha_vencimiento = (self.created_at or timezone.now()) + timezone.timedelta(days=self.producto.dias_caducidad)
+        if not self.fecha_vencimiento:
+            dias = getattr(self.producto, "dias_caducidad", None)
+            try:
+                dias = int(dias) if dias is not None else 0
+            except (TypeError, ValueError):
+                dias = 0
+
+            if 0 < dias <= 36500:
+                try:
+                    self.fecha_vencimiento = (self.created_at or timezone.now()) + timezone.timedelta(days=dias)
+                except OverflowError:
+                    self.fecha_vencimiento = None
+            else:
+                self.fecha_vencimiento = None
         
         super().save(*args, **kwargs)
        

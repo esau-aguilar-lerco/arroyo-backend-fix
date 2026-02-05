@@ -410,6 +410,7 @@ class PermissionViewSet(ReadOnlyModelViewSet):
             'can_crear_solicitud_traspaso': 'Crear Solicitud de Traspaso ',
             'can_view_solicitud_traspaso': 'Ver Solicitud de Traspaso',
             'can_rechazar_solicitud_traspaso': 'Rechazar Solicitud de Traspaso ',
+            'can_aprobar_solicitud_traspaso': 'Aprobar Solicitud de Traspaso ',
         }
         
         PERM_INVETARIO ={

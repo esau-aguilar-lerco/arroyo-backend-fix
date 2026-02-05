@@ -1,6 +1,7 @@
 from apps.inventario.models import MovimientoInventario, ProductosMovimiento, LoteInventario, Transformacion
 #from apps.erp.models import Producto, Almacen
 from django.db import transaction
+from django.db.models import Sum
 from decimal import Decimal
 
 
@@ -16,7 +17,7 @@ def crear_movimiento_transformacion(almacen=None, tipo=None, productos_entrada=[
     if len(nota) > 150 or len(nota) == 0:
         raise ValueError("La nota debe tener entre 1 y 150 caracteres.")
     nota = nota.strip()
-    _validar_lotes_producto(productos_entrada, almacen)
+    _validar_lotes_producto(productos_entrada, almacen, tipo)
     
     if tipo == Transformacion.TIPO_MERMA:
         #retoenamos tupla
@@ -134,7 +135,7 @@ def _crear_movimiento_entrada(almacen=None, productos_salida=[], nota="", usuari
         
         
         
-def _crear_movimiento_salida(almacen=None, productos_entrada=[], nota="", usuario=None,tipo=Transformacion.TIPO_MERMA,referencia=""):
+def _crear_movimiento_salida(almacen=None, productos_entrada=[], nota="", usuario=None, tipo=Transformacion.TIPO_MERMA, referencia=""):
     with transaction.atomic():
         cant_productos = sum([float(producto_data.get('cantidad')) for producto_data in productos_entrada])
         movimiento = MovimientoInventario.objects.create(
@@ -152,6 +153,13 @@ def _crear_movimiento_salida(almacen=None, productos_entrada=[], nota="", usuari
             producto = producto_data.get('producto')
             #cantidad_total = Decimal(producto_data.get('cantidad'))
             lotes = producto_data.get('lotes', [])
+            if not lotes:
+                lotes = _asignar_lotes_fifo(
+                    producto=producto,
+                    cantidad_total=producto_data.get('cantidad'),
+                    almacen=almacen
+                )
+                producto_data['lotes'] = lotes
             
             for lote_data in lotes:
                 lote = lote_data.get('lote')
@@ -164,35 +172,76 @@ def _crear_movimiento_salida(almacen=None, productos_entrada=[], nota="", usuari
                     cantidad=cantidad_lote,
                     costo_unitario=lote.costo_unitario
                 )
-                
-                # Actualizar el inventario del lote
-                lote.cantidad -= cantidad_lote
-                lote.save()
         
         return movimiento
     
 #=============================================
 #         VALIDAR LOTES
 #==============================================   
-def _validar_lotes_producto(productos_entrada = [], almacen=None):
+def _validar_lotes_producto(productos_entrada = [], almacen=None, tipo=None):
     if len(productos_entrada) == 0:
         raise ValueError("Debe proporcionar al menos un producto para la transformación.")
     
     for producto_data in productos_entrada:
         
         producto = producto_data.get('producto')
-        cantidad = float(producto_data.get('cantidad'))
+        cantidad = Decimal(str(producto_data.get('cantidad')))
         lotes = producto_data.get('lotes', [])
-        suma_lotes = sum([float(lote.get('cantidad')) for lote in lotes])
+        if tipo == Transformacion.TIPO_MERMA and not lotes:
+            total_stock = (LoteInventario.objects.filter(
+                producto=producto,
+                almacen=almacen,
+                cantidad__gt=0,
+                status_model=LoteInventario.STATUS_MODEL_ACTIVE
+            ).aggregate(total=Sum('cantidad'))['total'] or Decimal('0.00'))
+            if total_stock < cantidad:
+                raise ValueError(
+                    f"No hay suficiente inventario para merma del producto {producto.nombre}. "
+                    f"Disponible: {total_stock}, requerido: {cantidad}."
+                )
+            continue
+
+        suma_lotes = sum([Decimal(str(lote.get('cantidad'))) for lote in lotes])
         if suma_lotes != cantidad:
-            raise ValueError(f"La suma de las cantidades de los lotes ({suma_lotes}) no coincide con la cantidad total del producto ({cantidad}) para el producto  {producto.nombre}.")
+            raise ValueError(
+                f"La suma de las cantidades de los lotes ({suma_lotes}) no coincide con la "
+                f"cantidad total del producto ({cantidad}) para el producto {producto.nombre}."
+            )
         
         for lote_data in lotes:
             if almacen.id != lote_data.get('lote').almacen.id:
                 raise ValueError(f"El lote {lote_data.get('lote').id} no pertenece al almacén {almacen.nombre}.")
             lote = lote_data.get('lote')
-            cantidad_lote = float(lote_data.get('cantidad'))
+            cantidad_lote = Decimal(str(lote_data.get('cantidad')))
             if cantidad_lote <= 0:
                 raise ValueError(f"La cantidad del lote debe ser mayor a 0 para el lote {lote.id} del producto {producto.nombre}.")
-    
-    
+
+
+def _asignar_lotes_fifo(producto=None, cantidad_total=None, almacen=None):
+    cantidad_total = Decimal(str(cantidad_total))
+    lotes_qs = (LoteInventario.objects
+                .filter(
+                    producto=producto,
+                    almacen=almacen,
+                    cantidad__gt=0,
+                    status_model=LoteInventario.STATUS_MODEL_ACTIVE
+                )
+                .order_by('fecha_ingreso'))
+
+    restante = cantidad_total
+    lotes = []
+
+    for lote in lotes_qs:
+        if restante <= 0:
+            break
+        tomar = lote.cantidad if lote.cantidad <= restante else restante
+        lotes.append({'lote': lote, 'cantidad': tomar})
+        restante -= tomar
+
+    if restante > 0:
+        raise ValueError(
+            f"No hay suficiente inventario para merma del producto {producto.nombre}. "
+            f"Faltante: {restante}."
+        )
+
+    return lotes
