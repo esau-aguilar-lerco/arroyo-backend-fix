@@ -1,6 +1,7 @@
 from django.utils import timezone
 from django.db import transaction
 
+from rest_framework.exceptions import ValidationError
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -343,7 +344,7 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
                 # 🔹 LOTE ORIGEN (surtidor)
                 cantidad_restante = det.cantidad
 
-                lotes = LoteInventario.objects.filter(
+                lotes = LoteInventario.objects.select_for_update().filter(
                     producto=det.producto,
                     almacen=solicitud.almacen_surtidor,
                     cantidad__gt=0
@@ -356,10 +357,6 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
                         break
 
                     tomar = min(lote.cantidad, cantidad_restante)
-
-                    # descontar
-                    #lote.cantidad -= tomar
-                    #lote.save()
 
                     ProductosMovimiento.objects.create(
                         movimiento=movimiento,
@@ -375,9 +372,11 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
 
 
                 if cantidad_restante > 0:
-                    raise ValidationError(
-                        f"No hay suficiente inventario total del producto {det.producto.nombre}"
-                    )
+                    raise ValidationError({
+                        "success": False,
+                        "message": "No hay suficiente inventario para surtir la solicitud",
+                        "errors": {"detail": f"No hay suficiente inventario total del siguiente producto: {det.producto.nombre}"}
+                    })
 
 
                 # 🔹 LOTE DESTINO (solicitante)

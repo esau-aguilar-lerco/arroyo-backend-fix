@@ -189,14 +189,7 @@ def listar_preventas_con_detalles_carga(request):
         fase = request.query_params.get('fase', Venta.FASE_PRE_VENTA)
         solo_productos = request.query_params.get('solo_productos', '').lower() == 'true'
         user = request.user
-        almacen = user.almacen
-        print(f"almacen del usuario: {almacen}")
-        
-        if not almacen:
-            return Response(
-                {'detail': 'El usuario no tiene un almacén asignado.'},
-                status=status.HTTP_400_BAD_REQUEST
-            ) 
+        ruta = None
         
         # Construir filtros base
         filtros = {
@@ -207,7 +200,10 @@ def listar_preventas_con_detalles_carga(request):
         }
         
         if not ruta_id:
-            ruta = Rutas.objects.filter(asignado=user, status_model=BaseModel.STATUS_MODEL_ACTIVE).first()
+            ruta = (Rutas.objects
+                    .select_related('almacen_embarque')
+                    .filter(asignado=user, status_model=BaseModel.STATUS_MODEL_ACTIVE)
+                    .first())
             if ruta:
                 filtros['ruta_id'] = ruta.id
             else:
@@ -217,12 +213,31 @@ def listar_preventas_con_detalles_carga(request):
                 )
         else:
             try:
-                filtros['ruta_id'] = int(ruta_id)
+                ruta_id = int(ruta_id)
             except ValueError:
                 return Response(
                     {'detail': 'ruta_id debe ser un número entero'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
+            ruta = (Rutas.objects
+                    .select_related('almacen_embarque')
+                    .filter(id=ruta_id, status_model=BaseModel.STATUS_MODEL_ACTIVE)
+                    .first())
+            if not ruta:
+                return Response(
+                    {'detail': 'ruta_id no encontrada o inactiva'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            filtros['ruta_id'] = ruta.id
+
+        almacen = ruta.almacen_embarque
+        print(f"almacen de pedidos (ruta): {ruta.almacen_embarque} | almacen usuario: {user.almacen}")
+        
+        if not almacen:
+            return Response(
+                {'detail': 'No hay almacén de pedidos configurado para la ruta.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
         # Query optimizada
         preventas = Venta.objects.filter(

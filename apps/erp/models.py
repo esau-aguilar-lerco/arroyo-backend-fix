@@ -4,6 +4,7 @@ from django.utils import timezone
 from apps.base.models import BaseModel, BaseDireccion
 from apps.usuarios.models import Usuario
 from apps.contabilidad.models import CondicionPago,MetodoPago
+from datetime import timedelta
 
 class Empresa(BaseModel):
     class Meta:
@@ -822,6 +823,7 @@ class Compra(BaseModel):
     almacen_virtual = models.ForeignKey(Almacen, on_delete=models.CASCADE, related_name="compras_virtuales", verbose_name="Almacén Virtual")
     tiempo_recorrido = models.IntegerField(blank=True, null=True, default=None, verbose_name="Tiempo Recorrido")
     fecha_salida = models.DateField(blank=True, null=True, default=None, verbose_name="Fecha de Salida")
+    fecha_vencimiento = models.DateField(blank=True, null=True, verbose_name="Fecha de Vencimiento")
     estado = models.CharField(max_length=20, choices=ESTADO_COMPRA_CHOICES, default=ALMACEN_VIRTUAL, verbose_name="Estado")
     total = models.DecimalField(max_digits=25, decimal_places=2, verbose_name="Total")
     latitud = models.FloatField(blank=True, null=True, default=None, verbose_name="Latitud")
@@ -839,28 +841,25 @@ class Compra(BaseModel):
     def __str__(self):
         return f"Compra {self.codigo} - {self.proveedor.nombre}"
     
-    def save(self, *args, **kwargs):
-        self.nota = (self.nota or "").strip()
+    def save(self, *args, **kwargs):    
+        if not self.fecha_vencimiento:
+            producto = getattr(self, "producto", None)
+            dias = getattr(producto, "dias_caducidad", None)
+            try:
+                dias = int(dias) if dias is not None else 0
+            except (TypeError, ValueError):
+                dias = 0
 
-        creando = self.pk is None
-
-        # 🔹 Al crear la compra
-        if creando:
-            # Copiar condición de pago desde orden de compra
-            if self.orden_compra:
-                self.condicion_pago = self.orden_compra.condicion_pago
-
-        # 🔹 Asignar código si viene NULL
-        if not self.codigo:
-                # Prioridad 2: generar código propio
-                # Primero guardar para obtener PK
-                super().save(*args, **kwargs)
-                self.codigo = self.generar_codigo()
-                super().save(update_fields=["codigo"])
-                return
+            if 0 < dias <= 36500:
+                try:
+                    self.fecha_vencimiento = (self.created_at or timezone.now()) + timedelta(days=dias)
+                except OverflowError:
+                    self.fecha_vencimiento = None
+            else:
+                
+                self.fecha_vencimiento = None
 
         super().save(*args, **kwargs)
-
 
 
 

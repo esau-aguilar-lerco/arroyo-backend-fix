@@ -3,7 +3,7 @@ from django.utils import timezone
 from datetime import timedelta 
 from decimal import Decimal
 
-from apps.erp.models import Compra, CompraDetalle, OrdenCompra, Almacen,Insidencia, InsidenciaLote
+from apps.erp.models import Compra, CompraDetalle, OrdenCompra, Almacen,Insidencia, InsidenciaLote, Producto
 from apps.inventario.models import LoteInventario, MovimientoInventario, ProductosMovimiento
 
 
@@ -138,54 +138,67 @@ class AbastecimientoService:
         """
         lotes_creados = []
         productos_abastecidos = []
-        costo_total_abastecimiento = Decimal('0.00')
-        
-        for item in items:
-            ubicacion_rack = item.get('ubicacion_rack', None)
+        costo_total_abastecimiento = Decimal("0.00")
 
-            if ubicacion_rack is None and almacen_destino.is_cedis:
-                raise ValueError(f"El almacén destino es de tipo CEDIS, se requiere especificar la ubicación del rack para el producto ID {item['producto'].id}")
-            #FIJAMOS QUE SI EL ALMACEN NO ES CEDIS, LA UBICACION RACK SEA NONE
+        for item in items:
+            now = timezone.now()
+
+            producto_value = item["producto"]
+            if isinstance(producto_value, Producto):
+                producto = producto_value
+                producto_id = producto.id
+            else:
+                producto_id = producto_value
+                producto = Producto.objects.filter(
+                    id=producto_id,
+                    status_model=Producto.STATUS_MODEL_ACTIVE
+                ).first()
+                if not producto:
+                    raise ValueError(f"Producto con ID {producto_id} no encontrado o inactivo")
+
+            # Validación ubicación rack (CEDIS)
+            ubicacion_rack = item.get("ubicacion_rack")
+            if almacen_destino.is_cedis and ubicacion_rack is None:
+                raise ValueError(
+                    f"El almacén destino es CEDIS, se requiere 'ubicacion_rack' para producto ID {producto_id}"
+                )
             if not almacen_destino.is_cedis:
                 ubicacion_rack = None
-                
-                
-            costo_producto_compra = CompraDetalle.objects.filter(
-                compra_id=compra_id,
-                producto=item['producto']
-            ).first()
-            costo_unitario = Decimal('0.00')
-            if costo_producto_compra:
-                costo_unitario = costo_producto_compra.precio_unitario
-            
-            item['costo_unitario'] = costo_unitario
 
-            producto = item['producto']
-            cantidad = item['cantidad']
-            #costo_unitario = item['costo_unitario']
-            
+            # Cantidad (evita floats)
+            cantidad = item["cantidad"]
+            if not isinstance(cantidad, Decimal):
+                cantidad = Decimal(str(cantidad))
+
+            # Costo unitario desde CompraDetalle
+            detalle = CompraDetalle.objects.filter(
+                compra_id=compra_id,
+                producto_id=producto_id
+            ).only("precio_unitario").first()
+
+            costo_unitario = detalle.precio_unitario if detalle else Decimal("0.00")
+            item["costo_unitario"] = costo_unitario  # para tu procesar_entrada()
+
             costo_total_item = cantidad * costo_unitario
-            
-            # Crear el lote de inventario
-             # Calcular fecha de vencimiento
-            fecha_vencimiento = None
-            horas = producto.horas_caducidad if producto.horas_caducidad else 0
-        #if  1 == 1:# producto.horas_caducidad is not None and producto.horas_caducidad > 0:
-            fecha_vencimiento = timezone.now() + timedelta(hours= horas) #if producto.horas_caducidad else None
-        
+
+            # Caducidad por horas
+            horas = int(getattr(producto, "horas_caducidad", 0) or 0)
+            fecha_vencimiento = (now + timedelta(hours=horas)) if horas > 0 else None
+
+            # Crear lote
             lote = LoteInventario.objects.create(
                 producto=producto,
                 almacen=almacen_destino,
                 ubicacion=ubicacion_rack,
-                cantidad=0,
+                cantidad=Decimal("0.00"),
                 costo_unitario=costo_unitario,
-                fecha_ingreso=timezone.now(),
-                #fecha_vencimiento=fecha_vencimiento,
+                fecha_ingreso=now,
+                fecha_vencimiento=fecha_vencimiento,
                 created_by=user,
-                updated_by=user
+                updated_by=user,
             )
-            
-            # Crear el detalle del producto en el movimiento
+
+            # Crear producto-movimiento
             ProductosMovimiento.objects.create(
                 movimiento=movimiento_principal,
                 producto=producto,
@@ -194,25 +207,24 @@ class AbastecimientoService:
                 costo_unitario=costo_unitario,
                 costo_total=costo_total_item,
                 created_by=user,
-                #updated_by=user
             )
-            
+
             lotes_creados.append(lote)
             costo_total_abastecimiento += costo_total_item
-            
+
             productos_abastecidos.append({
                 "producto": {
                     "id": producto.id,
                     "nombre": producto.nombre,
-                    "codigo": producto.codigo or "Sin código"
+                    "codigo": producto.codigo or "Sin código",
                 },
                 "lote_id": lote.id,
                 "cantidad": float(cantidad),
                 "costo_unitario": float(costo_unitario),
                 "costo_total": float(costo_total_item),
-                "ubicacion": str(lote.ubicacion) if lote.ubicacion else "Sin asignar"
+                "ubicacion": str(lote.ubicacion) if lote.ubicacion else "Sin asignar",
             })
-        
+
         return lotes_creados, productos_abastecidos, costo_total_abastecimiento
 
     @staticmethod

@@ -176,16 +176,19 @@ class VentaMiniSerializer(BaseSerializer):
     total_detalles = serializers.IntegerField(source='detalles.count', read_only=True)
     origen = serializers.CharField(source='almacen.nombre', read_only=True)
     is_terminada = serializers.BooleanField(read_only=True)
+    condicion_pago = serializers.CharField(read_only=True)
 
     class Meta:
         model = Venta
         fields = (
             'id', 'codigo', 'cliente_nombre', 'ruta_nombre', 'fase', 
             'total', 'total_detalles', 'created_at','created_by',
-            'updated_at', 'updated_by','origen','was_preventa','is_terminada'
+            'updated_at', 'updated_by','origen','was_preventa','is_terminada',
+            'condicion_pago'
         )
         read_only_fields = (
-            'id', 'codigo', 'cliente_nombre', 'ruta_nombre', 'total_detalles', 'created_at','origen','was_preventa','is_terminada'
+            'id', 'codigo', 'cliente_nombre', 'ruta_nombre', 'total_detalles', 'created_at','origen','was_preventa','is_terminada',
+            'condicion_pago'
         )
 
     def get_ruta_nombre(self, obj):
