@@ -13,4 +13,4 @@ __pycache__/
 
 db.sqlite3
 *.sql
-*.dump
+*.dump.env
