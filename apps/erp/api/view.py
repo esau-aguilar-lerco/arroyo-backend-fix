@@ -933,7 +933,7 @@ class AlmacenMiniViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     Excludes objects with status_model set to BaseModel.STATUS_MODEL_DELETE.
     Pagination is disabled for this viewset.
     """
-    queryset = Almacen.objects.all().filter(status_model__in=[BaseModel.STATUS_MODEL_ACTIVE, BaseModel.STATUS_MODEL_INACTIVE], tipo__in=[Almacen.TIPO_FIJO, Almacen.TIPO_RUTA, Almacen.TIPO_INSIDENCIAS]).order_by('nombre')
+    queryset = Almacen.objects.all().filter(status_model__in=[BaseModel.STATUS_MODEL_ACTIVE, BaseModel.STATUS_MODEL_INACTIVE], tipo__in=[Almacen.TIPO_FIJO, Almacen.TIPO_RUTA, Almacen.TIPO_INCIDENCIAS]).order_by('nombre')
     serializer_class = AlmacenMiniSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = None

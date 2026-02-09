@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('erp', '0081_insidencialote'),
+        ('erp', '0081_incidencialote'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

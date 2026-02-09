@@ -1,8 +1,8 @@
 from rest_framework import serializers
-from apps.erp.models import Insidencia, InsidenciaLote
+from apps.erp.models import incidencia, IncidenciaLote
 
 
-TIPIFICACIONES_INSIDENCIA = [
+TIPIFICACIONES_INCIDENCIA = [
     "Producto danado",
     "Caducado/Vencido",
     "Empaque danado/abierto",
@@ -14,16 +14,16 @@ TIPIFICACIONES_INSIDENCIA = [
 ]
 
 
-class InsidenciaMiniSerializer(serializers.ModelSerializer):
+class IncidenciaMiniSerializer(serializers.ModelSerializer):
     """
-    Serializer liviano para listado de insidencias
+    Serializer liviano para listado de incidencias
     """
     total_lotes = serializers.SerializerMethodField()
     lotes_atendidos = serializers.SerializerMethodField()
     created_at = serializers.DateTimeField(format="%Y-%m-%d %H:%M:%S", read_only=True)
     
     class Meta:
-        model = Insidencia
+        model = incidencia
         fields = [
             'id',
             'descripcion',
@@ -34,15 +34,15 @@ class InsidenciaMiniSerializer(serializers.ModelSerializer):
         ]
     
     def get_total_lotes(self, obj):
-        return obj.lotes_insidencia.count()
+        return obj.lotes_incidencia.count()
     
     def get_lotes_atendidos(self, obj):
-        return obj.lotes_insidencia.filter(atendida=True).count()
+        return obj.lotes_incidencia.filter(atendida=True).count()
 
 
-class InsidenciaLoteDetailSerializer(serializers.ModelSerializer):
+class IncidenciaLoteDetailSerializer(serializers.ModelSerializer):
     """
-    Serializer para lotes dentro de una insidencia con info del producto
+    Serializer para lotes dentro de una incidencia con info del producto
     """
     lote_id = serializers.IntegerField(source='lote.id', read_only=True)
     producto_id = serializers.IntegerField(source='lote.producto.id', read_only=True)
@@ -55,7 +55,7 @@ class InsidenciaLoteDetailSerializer(serializers.ModelSerializer):
     fecha_atencion = serializers.DateTimeField(format="%Y-%m-%d %H:%M:%S", read_only=True, allow_null=True)
     
     class Meta:
-        model = InsidenciaLote
+        model = IncidenciaLote
         fields = [
             'id',
             'lote_id',
@@ -73,11 +73,11 @@ class InsidenciaLoteDetailSerializer(serializers.ModelSerializer):
         ]
 
 
-class InsidenciaDetailSerializer(serializers.ModelSerializer):
+class IncidenciaDetailSerializer(serializers.ModelSerializer):
     """
-    Serializer completo para detalle de insidencia con sus lotes y productos
+    Serializer completo para detalle de incidencia con sus lotes y productos
     """
-    lotes = InsidenciaLoteDetailSerializer(source='lotes_insidencia', many=True, read_only=True)
+    lotes = IncidenciaLoteDetailSerializer(source='lotes_incidencia', many=True, read_only=True)
     created_at = serializers.DateTimeField(format="%Y-%m-%d %H:%M:%S", read_only=True)
     created_by_id = serializers.IntegerField(source='created_by.id', read_only=True, allow_null=True)
     created_by_name = serializers.SerializerMethodField()
@@ -85,7 +85,7 @@ class InsidenciaDetailSerializer(serializers.ModelSerializer):
     lotes_atendidos = serializers.SerializerMethodField()
     
     class Meta:
-        model = Insidencia
+        model = incidencia
         fields = [
             'id',
             'descripcion',
@@ -106,26 +106,26 @@ class InsidenciaDetailSerializer(serializers.ModelSerializer):
         return None
     
     def get_total_lotes(self, obj):
-        return obj.lotes_insidencia.count()
+        return obj.lotes_incidencia.count()
     
     def get_lotes_atendidos(self, obj):
-        return obj.lotes_insidencia.filter(atendida=True).count()
+        return obj.lotes_incidencia.filter(atendida=True).count()
 
 
-class AtenderInsidenciaLoteItemSerializer(serializers.Serializer):
+class AtenderIncidenciaLoteItemSerializer(serializers.Serializer):
     """
     Serializer para un item de lote a atender
     """
-    insidencia_lote_id = serializers.IntegerField(help_text="ID del InsidenciaLote a atender")
+    incidencia_lote_id = serializers.IntegerField(help_text="ID del IncidenciaLote a atender")
     tipificacion = serializers.ChoiceField(
-        choices=[(t, t) for t in TIPIFICACIONES_INSIDENCIA],
-        help_text="Tipificacion obligatoria para describir la insidencia"
+        choices=[(t, t) for t in TIPIFICACIONES_INCIDENCIA],
+        help_text="Tipificacion obligatoria para describir la incidencia"
     )
     nota = serializers.CharField(required=False, allow_blank=True, allow_null=True, help_text="Nota de atención (opcional)")
 
 
-class AtenderInsidenciaLoteSerializer(serializers.Serializer):
+class AtenderIncidenciaLoteSerializer(serializers.Serializer):
     """
-    Serializer para atender múltiples lotes de una insidencia
+    Serializer para atender múltiples lotes de una incidencia
     """
-    lotes = AtenderInsidenciaLoteItemSerializer(many=True, help_text="Lista de lotes a atender")
+    lotes = AtenderIncidenciaLoteItemSerializer(many=True, help_text="Lista de lotes a atender")

@@ -1,5 +1,5 @@
 from apps.inventario.models import MovimientoInventario, ProductosMovimiento, LoteInventario
-from apps.erp.models import Insidencia, InsidenciaLote,Almacen
+from apps.erp.models import incidencia, IncidenciaLote,Almacen
 from django.db import transaction
 
 
@@ -111,11 +111,11 @@ def create_movimiento_entrada(model_movimiento,productos_con_lote, user=None,ref
                     item_vir.save()
 
                 
-        # Crear insidencia si hay lotes con diferencias
+        # Crear incidencia si hay lotes con diferencias
         print(lotes_incidencias)
         if lotes_incidencias:
-            ALMACEN_incidencia = Almacen.objects.filter(tipo=Almacen.TIPO_INSIDENCIAS).first()
-            _crear_insidencia(
+            ALMACEN_incidencia = Almacen.objects.filter(tipo=Almacen.TIPO_INCIDENCIAS).first()
+            _crear_incidencia(
                 productos_incidencias=lotes_incidencias,
                 almacen=ALMACEN_incidencia,
                 movimiento=model_movimiento,
@@ -131,9 +131,9 @@ def create_movimiento_entrada(model_movimiento,productos_con_lote, user=None,ref
         return movimiento_entrada
     
     
-def crear_lote_insidencia(almacen,producto,  cantidad, costo_unitario,  user=None,referencia = None):
+def crear_lote_incidencia(almacen,producto,  cantidad, costo_unitario,  user=None,referencia = None):
     """
-    Crea un nuevo lote para una insidencia
+    Crea un nuevo lote para una incidencia
     """
     lote = LoteInventario.objects.create(
         referencia=referencia,
@@ -146,16 +146,16 @@ def crear_lote_insidencia(almacen,producto,  cantidad, costo_unitario,  user=Non
     )
     return lote
 
-def _crear_insidencia(productos_incidencias, almacen, movimiento, user):
+def _crear_incidencia(productos_incidencias, almacen, movimiento, user):
         """
-        Crea una insidencia para los productos con diferencias en la entrada
+        Crea una incidencia para los productos con diferencias en la entrada
         """
         #from apps.erp.models import 
 
         if not productos_incidencias:
             return None
 
-        insidencia = Insidencia.objects.create(
+        incidencia = incidencia.objects.create(
             descripcion="",
             resuelta=False,
             created_by=user,
@@ -163,7 +163,7 @@ def _crear_insidencia(productos_incidencias, almacen, movimiento, user):
         )
 
         for item in productos_incidencias:
-            lote = crear_lote_insidencia(
+            lote = crear_lote_incidencia(
                 producto=item['producto'],
                 cantidad=item['cantidad'],
                 costo_unitario=item['costo_unitario'],
@@ -172,8 +172,8 @@ def _crear_insidencia(productos_incidencias, almacen, movimiento, user):
                 user=user
             )
             
-            InsidenciaLote.objects.create(
-                insidencia=insidencia,
+            IncidenciaLote.objects.create(
+                incidencia=incidencia,
                 lote=lote,  # No hay lote asociado en este caso
                 #producto=item['producto'],
                 cantidad=item['cantidad'],
@@ -182,4 +182,4 @@ def _crear_insidencia(productos_incidencias, almacen, movimiento, user):
                 updated_by=user
             )
 
-        return insidencia
+        return incidencia

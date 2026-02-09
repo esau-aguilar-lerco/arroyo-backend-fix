@@ -100,11 +100,11 @@ def crear_almacenes_help_cedis(sender, **kwargs):
                 tipo=Almacen.TIPO_HELP_CEDIS,
                 is_cedis=False,
             )
-        if not Almacen.objects.filter(tipo=Almacen.TIPO_INSIDENCIAS).exists():
+        if not Almacen.objects.filter(tipo=Almacen.TIPO_INCIDENCIAS).exists():
             Almacen.objects.create(
-                nombre="ALMACÉN INSIDENCIAS",
+                nombre="ALMACÉN incidencias",
                 codigo=None,  # se autogenera en save()
-                tipo=Almacen.TIPO_INSIDENCIAS,
+                tipo=Almacen.TIPO_INCIDENCIAS,
                 is_cedis=False,
             )
 

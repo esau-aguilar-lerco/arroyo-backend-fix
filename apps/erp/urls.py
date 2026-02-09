@@ -26,7 +26,7 @@ from apps.erp.api.embarque_view import (
     checkin_producto_embarque
 )
 from apps.erp.api.reparto_view import entrega_producto_ruta
-from apps.erp.api.insidencias import InsidenciaListRetrieveAPIView, atender_insidencia_lote
+from apps.erp.api.incidencias import IncidenciaListRetrieveAPIView, atender_incidencia_lote
 from apps.erp.api.notificacion import NotificacionViewSet
 from apps.erp.api.gastos_compra_view import GastosCompraViewSet
 from apps.contabilidad.api.views import RegimenFiscalViewSet, UnidadSatViewSet
@@ -115,10 +115,10 @@ urlpatterns = [
     path('embarques-reparto/checkin/', checkin_producto_embarque, name='embarque-checkin-producto'),
     # Reparto - entrega de productos
     path('reparto/entrega-producto/', entrega_producto_ruta, name='reparto-entrega-producto'),
-    # Insidencias
-    path('incidencias/', InsidenciaListRetrieveAPIView.as_view(), name='insidencia-list'),
-    path('incidencias/<int:pk>/', InsidenciaListRetrieveAPIView.as_view(), name='insidencia-detail'),
-    path('incidencias/atender-lote/', atender_insidencia_lote, name='insidencia-atender-lote'),
+    # incidencias
+    path('incidencias/', IncidenciaListRetrieveAPIView.as_view(), name='incidencia-list'),
+    path('incidencias/<int:pk>/', IncidenciaListRetrieveAPIView.as_view(), name='incidencia-detail'),
+    path('incidencias/atender-lote/', atender_incidencia_lote, name='incidencia-atender-lote'),
 ]
 
 urlpatterns += rutas.urls

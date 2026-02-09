@@ -4045,8 +4045,8 @@ paths:
   /api/incidencias/:
     get:
       operationId: incidencias_list
-      description: Obtiene el listado de insidencias con paginación y filtros
-      summary: Listar insidencias
+      description: Obtiene el listado de incidencias con paginación y filtros
+      summary: Listar incidencias
       parameters:
       - in: query
         name: resuelta
@@ -4059,7 +4059,7 @@ paths:
           type: string
         description: Buscar por descripción
       tags:
-      - Insidencias
+      - incidencias
       security:
       - cookieAuth: []
       - jwtAuth: []
@@ -4070,13 +4070,13 @@ paths:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/InsidenciaMini'
+                  $ref: '#/components/schemas/IncidenciaMini'
           description: ''
   /api/incidencias/{id}/:
     get:
       operationId: incidencias_list_2
-      description: Obtiene el listado de insidencias con paginación y filtros
-      summary: Listar insidencias
+      description: Obtiene el listado de incidencias con paginación y filtros
+      summary: Listar incidencias
       parameters:
       - in: path
         name: id
@@ -4094,7 +4094,7 @@ paths:
           type: string
         description: Buscar por descripción
       tags:
-      - Insidencias
+      - incidencias
       security:
       - cookieAuth: []
       - jwtAuth: []
@@ -4105,26 +4105,26 @@ paths:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/InsidenciaMini'
+                  $ref: '#/components/schemas/IncidenciaMini'
           description: ''
   /api/incidencias/atender-lote/:
     post:
       operationId: incidencias_atender_lote_create
-      description: Marca múltiples lotes de una insidencia como atendidos
-      summary: Atender lotes de insidencia
+      description: Marca múltiples lotes de una incidencia como atendidos
+      summary: Atender lotes de incidencia
       tags:
-      - Insidencias
+      - incidencias
       requestBody:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/AtenderInsidenciaLote'
+              $ref: '#/components/schemas/AtenderIncidenciaLote'
           application/x-www-form-urlencoded:
             schema:
-              $ref: '#/components/schemas/AtenderInsidenciaLote'
+              $ref: '#/components/schemas/AtenderIncidenciaLote'
           multipart/form-data:
             schema:
-              $ref: '#/components/schemas/AtenderInsidenciaLote'
+              $ref: '#/components/schemas/AtenderIncidenciaLote'
         required: true
       security:
       - cookieAuth: []
@@ -4134,7 +4134,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AtenderInsidenciaLoteResponse'
+                $ref: '#/components/schemas/AtenderIncidenciaLoteResponse'
           description: ''
         '400':
           content:
@@ -9536,31 +9536,31 @@ components:
           description: Lista de IDs de permisos a agregar
       required:
       - permission_ids
-    AtenderInsidenciaLote:
+    AtenderIncidenciaLote:
       type: object
-      description: Serializer para atender múltiples lotes de una insidencia
+      description: Serializer para atender múltiples lotes de una incidencia
       properties:
         lotes:
           type: array
           items:
-            $ref: '#/components/schemas/AtenderInsidenciaLoteItem'
+            $ref: '#/components/schemas/AtenderIncidenciaLoteItem'
           description: Lista de lotes a atender
       required:
       - lotes
-    AtenderInsidenciaLoteItem:
+    AtenderIncidenciaLoteItem:
       type: object
       description: Serializer para un item de lote a atender
       properties:
-        insidencia_lote_id:
+        incidencia_lote_id:
           type: integer
-          description: ID del InsidenciaLote a atender
+          description: ID del IncidenciaLote a atender
         nota:
           type: string
           nullable: true
           description: Nota de atención (opcional)
       required:
-      - insidencia_lote_id
-    AtenderInsidenciaLoteResponse:
+      - incidencia_lote_id
+    AtenderIncidenciaLoteResponse:
       type: object
       properties:
         success:
@@ -9569,12 +9569,12 @@ components:
           type: string
         lotes_atendidos:
           type: integer
-        insidencias_resueltas:
+        incidencias_resueltas:
           type: array
           items:
             type: integer
       required:
-      - insidencias_resueltas
+      - incidencias_resueltas
       - lotes_atendidos
       - message
       - success
@@ -12357,19 +12357,19 @@ components:
       - fecha_salida
       - message
       - success
-    InsidenciaMini:
+    IncidenciaMini:
       type: object
-      description: Serializer liviano para listado de insidencias
+      description: Serializer liviano para listado de incidencias
       properties:
         id:
           type: integer
           readOnly: true
         descripcion:
           type: string
-          title: Descripción de la Insidencia
+          title: Descripción de la incidencia
         resuelta:
           type: boolean
-          title: Insidencia Resuelta
+          title: incidencia Resuelta
         created_at:
           type: string
           format: date-time
