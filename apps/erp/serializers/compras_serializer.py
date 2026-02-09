@@ -211,8 +211,12 @@ class OrdenCompraSerializer(BaseSerializer):
         """
         Validaciones generales
         """
-         # Validar que no se pueda modificar si está en estados no permitidos
-        if self.instance and self.instance.estado in [OrdenCompra.FINALIZADA, OrdenCompra.CANCELADA, OrdenCompra.EN_PROCESO]:
+         # Validar que no se pueda modificar si está en estados no permitidos (salvo superusuario)
+        request = self.context.get('request')
+        is_admin = bool(
+            request and getattr(request, 'user', None) and (request.user.is_superuser or request.user.is_staff)
+        )
+        if self.instance and self.instance.estado in [OrdenCompra.FINALIZADA, OrdenCompra.CANCELADA, OrdenCompra.EN_PROCESO] and not is_admin:
             raise DRFValidationError("No se puede modificar una orden de compra finalizada, cancelada o en proceso.")
 
         proveedor = data.get('proveedor')
@@ -609,6 +613,9 @@ class CompraSerializer(BaseSerializer):
     pagos_detalle = serializers.SerializerMethodField(read_only=True)
     pagar_con_credito = serializers.BooleanField(default=False, help_text="Indica si se pagará con crédito del proveedor")
     pago_credito = serializers.DecimalField(max_digits=20, decimal_places=4, required=False, allow_null=True, help_text="Monto a pagar con crédito del proveedor",default=Decimal('0.00'))
+
+    total_gastos = serializers.SerializerMethodField(read_only=True)
+    total_con_gastos = serializers.SerializerMethodField(read_only=True)
     
     detalles = CompraDetalleSerializer(many=True, required=False)
     
@@ -617,7 +624,7 @@ class CompraSerializer(BaseSerializer):
         fields = [
             'id', 'codigo','is_app', 'orden_compra', 'orden_compra_obj', 'proveedor', 'proveedor_obj',
             'almacen_destino', 'almacen_destino_obj','destino_is_cedis',
-            'total', 'estado',
+            'total', 'total_gastos', 'total_con_gastos', 'estado',
             "existe_diferencia",
             # 'total_calculado', 'total_productos', 'total_pagado', 'saldo_pendiente',
             'tiempo_recorrido', 'fecha_salida', 'latitud', 'longitud', 'nota',
@@ -625,7 +632,7 @@ class CompraSerializer(BaseSerializer):
             'condicion_pago','pagos_detalle', 'pagos', 'pagar_con_credito', 'pago_credito'
         ]
         read_only_fields = (
-            'id', 'codigo', 'total',"existe_diferencia",'destino_is_cedis',
+            'id', 'codigo', 'total', 'total_gastos', 'total_con_gastos', "existe_diferencia",'destino_is_cedis',
             'created_at', 'updated_at', 'created_by', 'updated_by'
         )
         
@@ -646,6 +653,20 @@ class CompraSerializer(BaseSerializer):
                 'referencia': pago.referencia,
             })
         return pagos_list
+
+    def get_total_gastos(self, obj):
+        """
+        Obtener el total de gastos adicionales de la compra
+        """
+        gastos_qs = obj.gastos.exclude(status_model=BaseModel.STATUS_MODEL_DELETE)
+        return sum((gasto.monto for gasto in gastos_qs), Decimal('0.00'))
+
+    def get_total_con_gastos(self, obj):
+        """
+        Total de compra incluyendo gastos adicionales
+        """
+        total_base = obj.total or Decimal('0.00')
+        return total_base + self.get_total_gastos(obj)
 
     def validate_detalles(self, detalles):
         """
