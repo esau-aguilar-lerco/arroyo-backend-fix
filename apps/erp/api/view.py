@@ -1226,7 +1226,7 @@ class OrdenCompraViewSet(viewsets.ModelViewSet):
             return self.respuesta_404()
         
         # No permitir editar órdenes finalizadas o canceladas
-        if instance.estado in [OrdenCompra.FINALIZADA, OrdenCompra.CANCELADA, OrdenCompra.EN_PROCESO]:
+        if instance.estado in [OrdenCompra.FINALIZADA, OrdenCompra.CANCELADA, OrdenCompra.EN_PROCESO] and not (request.user.is_superuser or request.user.is_staff):
             return Response(
                 {"detail": f"No se puede editar una orden de compra {instance.estado.lower()}."},
                 status=status.HTTP_400_BAD_REQUEST
@@ -1497,7 +1497,8 @@ class CompraViewSet(viewsets.ModelViewSet):
             .select_related('proveedor', 'almacen_destino', 'almacen_virtual', 'orden_compra')
             .prefetch_related(
                 'detalles__producto',
-                'pagos__metodo_pago'
+                'pagos__metodo_pago',
+                'gastos'
             )
             .exclude(status_model=BaseModel.STATUS_MODEL_DELETE)
         )
@@ -1540,6 +1541,26 @@ class CompraViewSet(viewsets.ModelViewSet):
             examples=[
                 OpenApiExample('Almacén principal', value=1),
                 OpenApiExample('Almacén secundario', value=2),
+            ]
+        ),
+        OpenApiParameter(
+            name='fecha_desde',
+            type=OpenApiTypes.DATE,
+            location=OpenApiParameter.QUERY,
+            description='Fecha de inicio (YYYY-MM-DD) para filtrar compras por fecha de salida',
+            required=False,
+            examples=[
+                OpenApiExample('Inicio de mes', value='2026-02-01'),
+            ]
+        ),
+        OpenApiParameter(
+            name='fecha_hasta',
+            type=OpenApiTypes.DATE,
+            location=OpenApiParameter.QUERY,
+            description='Fecha de fin (YYYY-MM-DD) para filtrar compras por fecha de salida',
+            required=False,
+            examples=[
+                OpenApiExample('Fin de mes', value='2026-02-28'),
             ]
         ),
         OpenApiParameter(
