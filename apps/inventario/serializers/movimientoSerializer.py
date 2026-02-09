@@ -37,7 +37,7 @@ class ProductosMovimientoSerializer(serializers.Serializer):
     )
     cantidad = serializers.DecimalField(
         max_digits=10,
-        decimal_places=2,
+        decimal_places=3,
         min_value=Decimal('0.01'),
         help_text="Cantidad del producto a mover (debe ser mayor a 0)"
     )
@@ -256,10 +256,29 @@ class MovimientoSalidaSerializer(serializers.Serializer):
             except Usuario.DoesNotExist:
                 user = None
 
-        almacen_origen = validated_data['almacen_origen'] 
-        almacen_origen = almacen_origen if almacen_origen else user.almacen
+        almacen_origen = validated_data.get('almacen_origen')
+        user_almacen = getattr(user, "almacen", None)
+        # Para abastecimientos/traspasos el origen SIEMPRE es CEDIS
         if not almacen_origen:
-            raise serializers.ValidationError("El almacén de origen no pudo ser determinado. Por favor, especifíquelo explícitamente.")
+            if user_almacen and getattr(user_almacen, "is_cedis", False):
+                almacen_origen = user_almacen
+            else:
+                almacen_origen = Almacen.objects.filter(
+                    is_cedis=True,
+                    status_model=Almacen.STATUS_MODEL_ACTIVE
+                ).first()
+        if not getattr(almacen_origen, "is_cedis", False):
+            if user_almacen and getattr(user_almacen, "is_cedis", False):
+                almacen_origen = user_almacen
+            else:
+                almacen_origen = Almacen.objects.filter(
+                    is_cedis=True,
+                    status_model=Almacen.STATUS_MODEL_ACTIVE
+                ).first()
+        if not almacen_origen:
+            raise serializers.ValidationError(
+                "No se encontró un almacén CEDIS activo para usar como origen."
+            )
         almacen_destino = validated_data['almacen_destino'] if 'almacen_destino' in validated_data else None
         nota = validated_data.get('nota', "")
         sub_movimiento = MovimientoInventario.SALIDA_TRASPASO 
@@ -426,7 +445,7 @@ class AbastecimientoItemSerializer(serializers.Serializer):
     )
     cantidad = serializers.DecimalField(
         max_digits=20, 
-        decimal_places=2, 
+        decimal_places=3, 
         min_value=Decimal('0.01'),
         help_text="Cantidad a abastecer (debe ser mayor a 0)"
     )
@@ -528,7 +547,7 @@ class AbastecimientoItemSerializer_(serializers.Serializer):
     )
     cantidad = serializers.DecimalField(
         max_digits=10, 
-        decimal_places=2, 
+        decimal_places=3, 
         min_value=Decimal('0.01'),
         help_text="Cantidad a abastecer (debe ser mayor a 0)"
     )

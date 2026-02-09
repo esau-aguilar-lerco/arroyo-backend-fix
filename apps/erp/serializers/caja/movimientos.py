@@ -4,7 +4,7 @@ from decimal import Decimal
 
 # Models
 from apps.erp.models import  CajaTransaccion, PagosVenta, Venta
-from apps.contabilidad.models import MetodoPago
+from apps.contabilidad.models import MetodoPago, CondicionPago
 
 # Serializers base
 from apps.base.serializer import BaseSerializer, SerializerRelatedField
@@ -161,8 +161,27 @@ class MovimientoCajaVentaSerializer(serializers.Serializer):
         #print("Adeudo actual:", type(adeudo_actual), adeudo_actual)
         #print("Total pagos:", type(total_pagos), total_pagos)
 
-        #obtner el cambio 
-        cambio =   max(float(total_pagos) - float(adeudo_actual), 0)
+        # Obtener el cambio (si el pago excede el adeudo)
+        cambio = total_pagos - adeudo_actual
+        if cambio < 0:
+            cambio = Decimal('0.00')
+        
+        # Validar que el cambio solo se aplique con EFECTIVO
+        monto_efectivo = sum(
+            Decimal(str(pago['monto']))
+            for pago in pagos
+            if pago['metodo_pago'].nombre.upper() == 'EFECTIVO'
+        )
+        if cambio > 0 and monto_efectivo <= 0:
+            raise serializers.ValidationError({
+                'pagos': 'El cambio solo puede aplicarse si hay un pago en EFECTIVO.',
+                'error_code': 'CAMBIO_SIN_EFECTIVO'
+            })
+        if cambio > monto_efectivo:
+            raise serializers.ValidationError({
+                'pagos': 'El cambio no puede ser mayor al efectivo recibido.',
+                'error_code': 'CAMBIO_MAYOR_EFECTIVO'
+            })
         
         #if float(total_pagos) > float(adeudo_actual):
         #    raise serializers.ValidationError({
@@ -192,7 +211,7 @@ class MovimientoCajaVentaSerializer(serializers.Serializer):
         usuario = validated_data['_usuario']
         pagar_con_credito = validated_data.get('pagar_con_credito', False)
         pago_credito = validated_data.get('pago_credito', Decimal('0.00'))
-        cambio = validated_data.get('_cambio', Decimal('0.00'))
+        cambio = Decimal(str(validated_data.get('_cambio', Decimal('0.00'))))
         
         
         pagos_creados = []
@@ -201,18 +220,23 @@ class MovimientoCajaVentaSerializer(serializers.Serializer):
         try:
             
 
+            total_pagado_incremento = Decimal('0.00')
+            cambio_restante = Decimal(str(cambio))
+
             for pago_data in pagos_data:
                 metodo_pago = pago_data['metodo_pago']
-                monto = Decimal(str(pago_data['monto']))
-                #print("METODO PAGO:", metodo_pago.nombre, "MONTO:", cambio)
+                monto_bruto = Decimal(str(pago_data['monto']))
+                monto_pagado = monto_bruto
                 referencia = pago_data.get('referencia', '').strip()
-                if metodo_pago.nombre.upper() == 'EFECTIVO' and cambio > 0:
-                    monto = monto - Decimal(str(cambio))
+                if metodo_pago.nombre.upper() == 'EFECTIVO' and cambio_restante > 0:
+                    cambio_aplicado = min(cambio_restante, monto_pagado)
+                    monto_pagado = monto_pagado - cambio_aplicado
+                    cambio_restante = cambio_restante - cambio_aplicado
                     
                     transaccion = CajaTransaccion.objects.create(
                     caja_apertura=caja_apertura,
                     tipo=CajaTransaccion.TIPO_SALIDA,
-                    monto=cambio,
+                    monto=cambio_aplicado,
                     metodo_pago=metodo_pago,
                     descripcion=f"SALIDA CAMBIO EN EFECTIVO POR {venta.codigo}",
                     created_by=usuario,
@@ -226,7 +250,7 @@ class MovimientoCajaVentaSerializer(serializers.Serializer):
                 transaccion = CajaTransaccion.objects.create(
                     caja_apertura=caja_apertura,
                     tipo=CajaTransaccion.TIPO_ENTRADA,
-                    monto=monto + Decimal(str(cambio)),
+                    monto=monto_bruto,
                     metodo_pago=metodo_pago,
                     descripcion=f"Pago de venta {venta.codigo} - {metodo_pago.nombre}",
                     created_by=usuario,
@@ -238,13 +262,14 @@ class MovimientoCajaVentaSerializer(serializers.Serializer):
                 # Crear registro en PagosVenta
                 pago_venta = PagosVenta.objects.create(
                     venta=venta,
-                    monto=monto,
+                    monto=monto_pagado,
                     metodo_pago=metodo_pago,
                     referencia=referencia or None,
                     created_by=usuario,
                     #updated_by=usuario
                 )
                 pagos_creados.append(pago_venta)
+                total_pagado_incremento += monto_pagado
                 
             if pagar_con_credito and pago_credito > 0:
                 from apps.credito.models import CreditoCliente
@@ -258,12 +283,24 @@ class MovimientoCajaVentaSerializer(serializers.Serializer):
                 
             
             #  Actualizar total_pagado de la venta
-            venta.total_pagado = Decimal(str(venta.total_pagado)) + total_pagos
+            venta.total_pagado = Decimal(str(venta.total_pagado)) + total_pagado_incremento
             venta.cambio = Decimal(str(cambio))
             #venta.ya_terminada = True
             #  Si ya no hay adeudo, marcar como terminada
             #if float(venta.adeudo()) <= 0.0:
             #    venta.fase = Venta.FASE_TERMINADA
+
+            # Recalcular condición de pago según métodos usados
+            pagos_actuales = list(venta.pagos.all())
+            tiene_credito = any(p.metodo_pago and p.metodo_pago.is_credito for p in pagos_actuales)
+            tiene_no_credito = any(p.metodo_pago and not p.metodo_pago.is_credito for p in pagos_actuales)
+
+            if tiene_credito and tiene_no_credito:
+                venta.condicion_pago = CondicionPago.CONDICION_MIXTA
+            elif tiene_credito:
+                venta.condicion_pago = CondicionPago.CONDICION_CREDITO
+            else:
+                venta.condicion_pago = CondicionPago.CONDICION_CONTADO
             
             venta.save()
             

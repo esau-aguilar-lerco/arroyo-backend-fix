@@ -2,7 +2,7 @@ from apps.inventario.models import MovimientoInventario, ProductosMovimiento, Lo
 #from apps.erp.models import Producto, Almacen
 from django.db import transaction
 from django.db.models import Sum
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 
 
@@ -41,37 +41,68 @@ def crear_movimiento_transformacion(almacen=None, tipo=None, productos_entrada=[
         return model_trans
         
     elif tipo == Transformacion.TIPO_TRANSFORMACION:
-        mov_salida = _crear_movimiento_salida(
-            almacen=almacen,
-            productos_entrada=productos_entrada,
-            nota=nota,
-            usuario=usuario,
-            tipo=Transformacion.TIPO_TRANSFORMACION
-        )
-        mov_entrada = _crear_movimiento_entrada(
-            almacen=almacen,
-            productos_salida=productos_salida,
-            nota=nota,
-            usuario=usuario,
-            referencia=f"ENTRADA-TRANS-{mov_salida.id}"
-        )
-        
-        
-        mov_entrada.referencia = f"SALIDA-TRANS-{mov_salida.id}"
-        mov_entrada.save()
-        mov_salida.referencia = f"ENTRADA-TRANS-{mov_entrada.id}"
-        mov_salida.save()
-        
-        model_trans = crear_transformacion_registro(
-            almacen=almacen,
-            tipo=Transformacion.TIPO_TRANSFORMACION,
-            movimiento_salida=mov_salida,
-            movimiento_entrada=mov_entrada,
-            nota=nota,
-            usuario=usuario
-        )
-        
-        return model_trans
+        with transaction.atomic():
+            mov_salida = _crear_movimiento_salida(
+                almacen=almacen,
+                productos_entrada=productos_entrada,
+                nota=nota,
+                usuario=usuario,
+                tipo=Transformacion.TIPO_TRANSFORMACION
+            )
+            mov_entrada = _crear_movimiento_entrada(
+                almacen=almacen,
+                productos_salida=productos_salida,
+                nota=nota,
+                usuario=usuario,
+                referencia=f"ENTRADA-TRANS-{mov_salida.id}"
+            )
+            
+            
+            mov_entrada.referencia = f"SALIDA-TRANS-{mov_salida.id}"
+            mov_entrada.save()
+            mov_salida.referencia = f"ENTRADA-TRANS-{mov_entrada.id}"
+            mov_salida.save()
+            
+            model_trans = crear_transformacion_registro(
+                almacen=almacen,
+                tipo=Transformacion.TIPO_TRANSFORMACION,
+                movimiento_salida=mov_salida,
+                movimiento_entrada=mov_entrada,
+                nota=nota,
+                usuario=usuario
+            )
+
+            # Crear registro de MERMA informativa si hay diferencia entre entrada y salida.
+            total_entrada = _sumar_cantidades(productos_entrada)
+            total_salida = _sumar_cantidades(productos_salida)
+            if total_salida < total_entrada:
+                merma_total = (total_entrada - total_salida).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+                if merma_total > 0:
+                    merma_pct = Decimal('0.00')
+                    if total_entrada > 0:
+                        merma_pct = (merma_total / total_entrada * Decimal('100')).quantize(
+                            Decimal('0.01'), rounding=ROUND_HALF_UP
+                        )
+                    nota_merma = _build_nota_merma(nota, merma_total, merma_pct, mov_salida.id)
+                    mov_merma = _crear_movimiento_merma_registro(
+                        almacen=almacen,
+                        productos_entrada=productos_entrada,
+                        merma_total=merma_total,
+                        nota=nota_merma,
+                        usuario=usuario,
+                        referencia=f"MERMA-TRANS-{mov_salida.id}"
+                    )
+                    if mov_merma:
+                        crear_transformacion_registro(
+                            almacen=almacen,
+                            tipo=Transformacion.TIPO_MERMA,
+                            movimiento_salida=mov_merma,
+                            movimiento_entrada=None,
+                            nota=nota_merma,
+                            usuario=usuario
+                        )
+            
+            return model_trans
     else:
         pass
     
@@ -245,3 +276,85 @@ def _asignar_lotes_fifo(producto=None, cantidad_total=None, almacen=None):
         )
 
     return lotes
+
+
+def _sumar_cantidades(productos):
+    total = Decimal('0.00')
+    for producto_data in productos:
+        cantidad = Decimal(str(producto_data.get('cantidad') or 0))
+        total += cantidad
+    return total
+
+
+def _distribuir_merma_por_producto(productos_entrada, merma_total):
+    productos_validos = [
+        p for p in productos_entrada
+        if Decimal(str(p.get('cantidad') or 0)) > 0 and p.get('producto') is not None
+    ]
+    total_entrada = _sumar_cantidades(productos_validos)
+    if total_entrada <= 0 or merma_total <= 0:
+        return []
+
+    distribuido = []
+    acumulado = Decimal('0.00')
+
+    for idx, producto_data in enumerate(productos_validos):
+        producto = producto_data.get('producto')
+        cantidad = Decimal(str(producto_data.get('cantidad') or 0))
+        if cantidad <= 0:
+            continue
+
+        if idx == len(productos_validos) - 1:
+            merma_producto = (merma_total - acumulado).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        else:
+            proporcion = cantidad / total_entrada
+            merma_producto = (merma_total * proporcion).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            acumulado += merma_producto
+
+        if merma_producto > 0:
+            distribuido.append({
+                'producto': producto,
+                'cantidad': merma_producto
+            })
+
+    return distribuido
+
+
+def _crear_movimiento_merma_registro(almacen=None, productos_entrada=None, merma_total=Decimal('0.00'),
+                                     nota="", usuario=None, referencia=""):
+    productos_entrada = productos_entrada or []
+    merma_productos = _distribuir_merma_por_producto(productos_entrada, merma_total)
+    if not merma_productos:
+        return None
+
+    movimiento = MovimientoInventario.objects.create(
+        almacen=almacen,
+        tipo=MovimientoInventario.TIPO_SALIDA,
+        movimiento=MovimientoInventario.SALIDA_MERMA,
+        nota=nota,
+        fase=MovimientoInventario.FASE_TERMINADA,
+        created_by=usuario,
+        cantidad=merma_total,
+        referencia=referencia
+    )
+
+    for item in merma_productos:
+        ProductosMovimiento.objects.create(
+            movimiento=movimiento,
+            producto=item['producto'],
+            lote=None,
+            cantidad=item['cantidad'],
+            costo_unitario=Decimal('0.00')
+        )
+
+    return movimiento
+
+
+def _build_nota_merma(nota_base, merma_total, merma_pct, ref_id):
+    nota_base = (nota_base or "").strip()
+    resumen = f"MERMA AUTO: {merma_total} ({merma_pct}%) REF:{ref_id}"
+    if nota_base:
+        nota = f"{nota_base} | {resumen}"
+    else:
+        nota = resumen
+    return nota[:150]

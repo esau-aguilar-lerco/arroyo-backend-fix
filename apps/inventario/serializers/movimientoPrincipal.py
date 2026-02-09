@@ -9,7 +9,7 @@ from apps.base.serializer import FlexiblePKRelatedField
 
 class LoteMovimientoSerializer(serializers.Serializer):
     lote = serializers.CharField(help_text="Número de lote")
-    cantidad = serializers.DecimalField(max_digits=20, decimal_places=4, help_text="Cantidad a mover del lote")
+    cantidad = serializers.DecimalField(max_digits=20, decimal_places=3, help_text="Cantidad a mover del lote")
     
     
 class ProductoMovimientoSerializer(serializers.Serializer):
@@ -17,7 +17,7 @@ class ProductoMovimientoSerializer(serializers.Serializer):
     unidad_medida = serializers.CharField(source='producto.unidad_sat.nombre', read_only=True, allow_null=True)
     unidad_clave = serializers.CharField(source='producto.unidad_sat.clave', read_only=True, allow_null=True)
     producto = serializers.CharField(source='producto.id', read_only=True)
-    cantidad = serializers.DecimalField(max_digits=20, decimal_places=4, help_text="Cantidad del producto a mover")
+    cantidad = serializers.DecimalField(max_digits=20, decimal_places=3, help_text="Cantidad del producto a mover")
     lotes = LoteMovimientoSerializer(many=True, help_text="Lista de lotes asociados al producto")
 
 
@@ -32,7 +32,7 @@ class MovimientoPrincipalSerializer(serializers.Serializer):
     movimiento = serializers.CharField(source='get_movimiento_display', read_only=True)
     tipo = serializers.CharField(source='get_tipo_display', read_only=True)
     referencia = serializers.CharField(read_only=True)
-    cantidad = serializers.DecimalField(max_digits=20, decimal_places=4, read_only=True)
+    cantidad = serializers.DecimalField(max_digits=20, decimal_places=3, read_only=True)
     nota = serializers.CharField(read_only=True)
     productos = ProductoMovimientoSerializer(many=True, help_text="Lista de productos en el movimiento")
 
@@ -75,11 +75,11 @@ class MovimimientosMiniSerializer(serializers.ModelSerializer):
 #======================================================================
 class LoteEntradaSerializer(serializers.Serializer):
     lote = FlexiblePKRelatedField(queryset=LoteInventario.objects.all(), help_text="Lote relacionado")
-    cantidad = serializers.DecimalField(max_digits=20, decimal_places=4, help_text="Cantidad a ingresar del lote")
+    cantidad = serializers.DecimalField(max_digits=20, decimal_places=3, help_text="Cantidad a ingresar del lote")
 
 class ProductoEntradaSerializer(serializers.Serializer):
     producto = FlexiblePKRelatedField(queryset=Producto.objects.all(), help_text="Producto relacionado")
-    cantidad = serializers.DecimalField(max_digits=20, decimal_places=4, help_text="Cantidad del producto a ingresar")
+    cantidad = serializers.DecimalField(max_digits=20, decimal_places=3, help_text="Cantidad del producto a ingresar")
     lotes = LoteEntradaSerializer(many=True, help_text="Lista de lotes asociados al producto")
     
     def to_internal_value(self, data):
@@ -88,7 +88,7 @@ class ProductoEntradaSerializer(serializers.Serializer):
             try:
                 from decimal import Decimal, ROUND_HALF_UP
                 cantidad = Decimal(str(data['cantidad']))
-                data['cantidad'] = cantidad.quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP)
+                data['cantidad'] = cantidad.quantize(Decimal('0.001'), rounding=ROUND_HALF_UP)
             except (ValueError, TypeError, KeyError):
                 pass  # Dejar que el validador maneje el error
         

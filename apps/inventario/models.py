@@ -92,7 +92,7 @@ class LoteInventario(BaseModel):
     producto = models.ForeignKey(Producto, on_delete=models.SET_NULL, null=True, blank=True)
     almacen  = models.ForeignKey(Almacen, on_delete=models.SET_NULL, null=True, blank=True)
     ubicacion = models.ForeignKey(Rack, on_delete=models.SET_NULL, null=True, blank=True, help_text="Solo para almacenes CEDIS")
-    cantidad = models.DecimalField(max_digits=25, decimal_places=2, default=0,)
+    cantidad = models.DecimalField(max_digits=25, decimal_places=3, default=0,)
     costo_unitario = models.DecimalField(max_digits=25, decimal_places=2, default=0)
     fecha_ingreso = models.DateTimeField(auto_now_add=True)
     fecha_vencimiento = models.DateTimeField(null=True, blank=True)
@@ -224,7 +224,7 @@ class MovimientoInventario(BaseModel):
     almacen_destino = models.ForeignKey(Almacen, on_delete=models.SET_NULL, null=True, blank=True, related_name='movimientos_destino', help_text="Almacén de destino para el movimiento")
     tipo = models.CharField(max_length=20, choices=TIPO_MOVIMIENTO, default=TIPO_ENTRADA)
     movimiento = models.CharField(max_length=30, choices=ENTRADAS_CHOICES + SALIDAS_CHOICES + AJUSTE_CHOICES)
-    cantidad = models.DecimalField(max_digits=20, decimal_places=2, default=0)
+    cantidad = models.DecimalField(max_digits=20, decimal_places=3, default=0)
     costo_unitario = models.DecimalField(max_digits=20, decimal_places=2, default=0)
     #lote = models.ForeignKey(LoteInventario, on_delete=models.SET_NULL, null=True, blank=True)
     referencia = models.CharField(max_length=150, null=True, blank=True)
@@ -274,7 +274,7 @@ class ProductosMovimiento(BaseModel):
     movimiento = models.ForeignKey(MovimientoInventario, on_delete=models.CASCADE, related_name='productosMovimiento')
     producto = models.ForeignKey(Producto, on_delete=models.SET_NULL, null=True, blank=True)
     lote = models.ForeignKey(LoteInventario, on_delete=models.SET_NULL, null=True, blank=True)
-    cantidad = models.DecimalField(max_digits=20, decimal_places=2, default=0)
+    cantidad = models.DecimalField(max_digits=20, decimal_places=3, default=0)
     costo_unitario = models.DecimalField(max_digits=20, decimal_places=2, default=0)
     costo_total = models.DecimalField(max_digits=20, decimal_places=2, default=0)
 
@@ -360,16 +360,16 @@ class ProductoEmbarque(BaseModel):
     embarque = models.ForeignKey(EmbarqueReparto, on_delete=models.CASCADE, default=None, related_name='productos')
     preventa = models.ForeignKey('erp.Venta', on_delete=models.CASCADE, related_name='productos_embarque_venta', null=True, blank=True, default=None)
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE, related_name='lotes_embarque')
-    cantidad = models.DecimalField(max_digits=20, decimal_places=2, default=0)
+    cantidad = models.DecimalField(max_digits=20, decimal_places=3, default=0)
     is_cargado = models.BooleanField(default=False)
     precio_unitario = models.DecimalField(max_digits=20, decimal_places=2, default=0)
-    cantidad_solicitada = models.DecimalField(max_digits=20, decimal_places=2, default=0)
-    cantidad_entregada = models.DecimalField(max_digits=20, decimal_places=2, default=0)
+    cantidad_solicitada = models.DecimalField(max_digits=20, decimal_places=3, default=0)
+    cantidad_entregada = models.DecimalField(max_digits=20, decimal_places=3, default=0)
 class LoteProductoEmbarque(BaseModel):
     is_interno = models.BooleanField(default=False)
     producto_embarque = models.ForeignKey(ProductoEmbarque, on_delete=models.CASCADE, related_name='lotes')
     lote = models.ForeignKey(LoteInventario, on_delete=models.CASCADE, related_name='lotes_embarque')
-    cantidad = models.DecimalField(max_digits=20, decimal_places=2, default=0)   
+    cantidad = models.DecimalField(max_digits=20, decimal_places=3, default=0)   
  
 
 
@@ -400,7 +400,7 @@ class ProductosSolicitud(BaseModel):
         ordering = ['-created_at']
     almacen = models.ForeignKey(Almacen, on_delete=models.CASCADE, null=True, blank=True, related_name='solicitud_almacen', default=None)
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE, null=True, blank=True, related_name='solicitud_producto' , default=None)
-    cantidad = models.DecimalField(max_digits=20, decimal_places=2, default=0)
+    cantidad = models.DecimalField(max_digits=20, decimal_places=3, default=0)
     motivo = models.CharField(max_length=30, choices=MOTIVOS_SOLICITUD, default=MOTIVO_BAJA)
     fase = models.CharField(max_length=20, choices=ESTADOS, default=SOLICITUD)  
 

@@ -18,7 +18,9 @@ from apps.inventario.serializers.traspaso.traspasoSolicitudSerializer import (
 )
 
 from django.contrib.auth import get_user_model
-from apps.inventario.models import MovimientoInventario, ProductosMovimiento, LoteInventario
+from apps.inventario.models import MovimientoInventario, LoteInventario
+from apps.inventario.helpers.movimientoSalida import movimento_inventario
+from apps.erp.models import Almacen
 
 User = get_user_model()
 
@@ -329,47 +331,43 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
             
             solicitud.save()
             
-            # TODO: Aquí se creará el movimiento de inventario en el futuro
-            # ✅ Crear movimiento de salida (almacén surtidor)
-            movimiento = MovimientoInventario.objects.create(
-                almacen=solicitud.almacen_surtidor,
-                almacen_destino=solicitud.almacen_solicitante,
-                tipo=MovimientoInventario.TIPO_SALIDA,
-                movimiento=MovimientoInventario.SALIDA_TRASPASO,
-            )
+            # ✅ Preparar detalle de lotes (FIFO) para movimiento de traspaso
+            detalle_lotes = []
 
-            # ✅ Por cada producto solicitado, descontar inventario
+            # Validar que exista almacén virtual de traspaso
+            almacen_traspaso = Almacen.objects.filter(
+                tipo=Almacen.TIPO_TRASPASO,
+                pertence=solicitud.almacen_surtidor
+            ).first()
+            if not almacen_traspaso:
+                raise ValidationError({
+                    "success": False,
+                    "message": "No existe almacén virtual de traspaso para el almacén surtidor",
+                    "errors": {"detail": f"Configure un almacén tipo TRASPASO que pertenezca a {solicitud.almacen_surtidor.nombre}"}
+                })
+
             for det in solicitud.detalles.all():
-
                 # 🔹 LOTE ORIGEN (surtidor)
                 cantidad_restante = det.cantidad
 
                 lotes = LoteInventario.objects.select_for_update().filter(
                     producto=det.producto,
                     almacen=solicitud.almacen_surtidor,
-                    cantidad__gt=0
+                    cantidad__gt=0,
+                    status_model=LoteInventario.STATUS_MODEL_ACTIVE
                 ).order_by('created_at')
-                total_transferido = 0
-                ultimo_costo = None
+
+                lotes_asignados = []
 
                 for lote in lotes:
                     if cantidad_restante <= 0:
                         break
-
                     tomar = min(lote.cantidad, cantidad_restante)
-
-                    ProductosMovimiento.objects.create(
-                        movimiento=movimiento,
-                        producto=det.producto,
-                        lote=lote,
-                        cantidad=tomar,
-                        costo_unitario=lote.costo_unitario
-                    )
-
+                    lotes_asignados.append({
+                        'lote': lote,
+                        'cantidad': tomar
+                    })
                     cantidad_restante -= tomar
-                    total_transferido += tomar
-                    ultimo_costo = lote.costo_unitario
-
 
                 if cantidad_restante > 0:
                     raise ValidationError({
@@ -378,27 +376,21 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
                         "errors": {"detail": f"No hay suficiente inventario total del siguiente producto: {det.producto.nombre}"}
                     })
 
+                detalle_lotes.append({
+                    'producto': det.producto,
+                    'lotes': lotes_asignados
+                })
 
-                # 🔹 LOTE DESTINO (solicitante)
-                lote_destino = LoteInventario.objects.filter(
-                    producto=det.producto,
-                    almacen=solicitud.almacen_solicitante,
-                ).first()
-
-                if not lote_destino:
-                    lote_destino = LoteInventario.objects.create(
-                        producto=det.producto,
-                        almacen=solicitud.almacen_solicitante,
-                        cantidad=0,
-                        costo_unitario=ultimo_costo
-                    )
-
-                lote_destino.cantidad += total_transferido
-                lote_destino.save()
-
-
-
-
+            # ✅ Crear movimiento de traspaso (salida + virtual)
+            movimiento = movimento_inventario(
+                detalle_lotes=detalle_lotes,
+                almacen_salida=solicitud.almacen_surtidor,
+                almacen_destino=solicitud.almacen_solicitante,
+                movimiento=MovimientoInventario.TIPO_SALIDA,
+                sub_movimiento=MovimientoInventario.SALIDA_TRASPASO,
+                nota=f"TRASPASO SOLICITUD {solicitud.id}",
+                user=request.user
+            )
             # guardar relación
             solicitud.movimiento = movimiento
             solicitud.save()
@@ -459,46 +451,17 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         
         with transaction.atomic():
-            solicitud.estado = SolicitudTraspaso.APROBADO
-            solicitud.aprobado_el = timezone.now()
-            solicitud.aprobado_por = request.user
+            solicitud.estado = SolicitudTraspaso.RECHAZADO
+            solicitud.rechazado_el = timezone.now()
+            solicitud.rechazado_por = request.user
 
-            nota_aprobacion = serializer.validated_data.get('nota', '')
-            if nota_aprobacion:
+            nota_rechazo = serializer.validated_data.get('nota', '')
+            if nota_rechazo:
                 if solicitud.nota:
-                    solicitud.nota += f"\n\n[APROBACIÓN] {nota_aprobacion}"
+                    solicitud.nota += f"\n\n[RECHAZO] {nota_rechazo}"
                 else:
-                    solicitud.nota = f"[APROBACIÓN] {nota_aprobacion}"
+                    solicitud.nota = f"[RECHAZO] {nota_rechazo}"
 
-            solicitud.save()
-
-            # 👇👇👇 AQUÍ MISMO
-            movimiento = MovimientoInventario.objects.create(
-                almacen=solicitud.almacen_surtidor,
-                almacen_destino=solicitud.almacen_solicitante,
-                tipo=MovimientoInventario.TIPO_SALIDA,
-                movimiento=MovimientoInventario.SALIDA_TRASPASO,
-            )
-
-            for det in solicitud.detalles.all():
-                lote = LoteInventario.objects.filter(
-                    producto=det.producto,
-                    almacen=solicitud.almacen_surtidor,
-                    cantidad__gt=0
-                ).first()
-
-                if not lote:
-                    raise ValidationError("Stock insuficiente")
-
-                ProductosMovimiento.objects.create(
-                    movimiento=movimiento,
-                    producto=det.producto,
-                    lote=lote,
-                    cantidad=det.cantidad,
-                    costo_unitario=lote.costo_unitario
-                )
-
-            solicitud.movimiento = movimiento
             solicitud.save()
 
         

@@ -78,11 +78,13 @@ def movimento_inventario(detalle_lotes=[], almacen_salida=None, almacen_destino=
                     producto=model_lote.producto,
                     almacen=ALMACEN_TRASPASO,
                     ubicacion=None,  # Siempre null para almacenes virtuales
-                    cantidad=cantidad_lote_tomar,
+                    # Se inicia en 0 para que el ProductosMovimiento (ENTRADA) la sume una sola vez
+                    cantidad=0,
                     costo_unitario=model_lote.costo_unitario,
                     fecha_ingreso=model_lote.fecha_ingreso,  # Mantener fecha de ingreso original
                     fecha_vencimiento=model_lote.fecha_vencimiento,
-                    created_by=user
+                    created_by=user,
+                    referencia=f"TRASP-{model.id}-ORIG-{model_lote.id}",
                 )
                 # Asignar created_at manualmente antes de guardar
                 lote_new.created_at = model_lote.created_at
@@ -112,11 +114,10 @@ def actualiza_lote_salida(lote, cantidad, user_id=None):
     if lote.cantidad < cantidad:
         raise ValueError(f"El lote {lote_id} no tiene suficiente cantidad. Disponible: {lote.cantidad}, Requerido: {cantidad}")
     
-    lote.cantidad -= cantidad
-        
+    # La deducción real se hace en ProductosMovimiento.save()
     if user_id:
         lote.updated_by_id = user_id
-    
+
     lote.save()
     #print(f"Lote {lote_id} actualizado. Nueva cantidad: {lote.cantidad}")
     return lote
