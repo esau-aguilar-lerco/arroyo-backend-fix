@@ -11,7 +11,7 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.AlterField(
-            model_name='insidencialote',
+            model_name='incidencialote',
             name='cantidad',
             field=models.DecimalField(decimal_places=3, default=0, max_digits=20, verbose_name='Cantidad Afectada'),
         ),

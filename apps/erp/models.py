@@ -315,7 +315,7 @@ class Almacen(BaseModel):
     TIPO_RUTA =  'RUTA'
     TIPO_HELP_CEDIS = 'HELP'
     TIPO_EMBARQUE = 'EMBA'
-    TIPO_INSIDENCIAS = 'INSD'
+    TIPO_INCIDENCIAS = 'INSD'
 
     TIPO_CHOICES = [
         (TIPO_FIJO, 'FIJO'),
@@ -325,7 +325,7 @@ class Almacen(BaseModel):
         (TIPO_HELP_CEDIS,'HELP CEDIS'),
         (TIPO_EMBARQUE,'EMBARQUE'),
         (TIPO_TRASPASO,'TRASPASO'),
-        (TIPO_INSIDENCIAS,'INSIDENCIAS'),
+        (TIPO_INCIDENCIAS,'incidencias'),
     ] 
     
     class Meta:
@@ -1341,43 +1341,43 @@ class CajaTransaccion(BaseModel):
     
 """
 =======================================================================
-                        MODELO DE INSIDENCIAS
+                        MODELO DE incidencias
 =======================================================================
 """
 
-class Insidencia(BaseModel):
+class incidencia(BaseModel):
     
     class Meta:
-        verbose_name = "Insidencia"
-        verbose_name_plural = "Insidencias"
-    descripcion = models.TextField(verbose_name="Descripción de la Insidencia")
+        verbose_name = "incidencia"
+        verbose_name_plural = "incidencias"
+    descripcion = models.TextField(verbose_name="Descripción de la incidencia")
     solucion = models.TextField(blank=True, null=True, verbose_name="Solución Aplicada")
-    resuelta = models.BooleanField(default=False, verbose_name="Insidencia Resuelta")
+    resuelta = models.BooleanField(default=False, verbose_name="incidencia Resuelta")
     
     
     def __str__(self):
-        return f"Insidencia {self.pk} - {'Resuelta' if self.resuelta else 'Pendiente'}"
+        return f"incidencia {self.pk} - {'Resuelta' if self.resuelta else 'Pendiente'}"
 
 
-class InsidenciaLote(BaseModel):
+class IncidenciaLote(BaseModel):
     """
-    Modelo intermedio para relacionar Insidencias con Lotes de Inventario
+    Modelo intermedio para relacionar incidencias con Lotes de Inventario
     con campos adicionales de control
     """
     class Meta:
-        verbose_name = "Lote en Insidencia"
-        verbose_name_plural = "Lotes en Insidencias"
+        verbose_name = "Lote en incidencia"
+        verbose_name_plural = "Lotes en incidencias"
     
-    insidencia = models.ForeignKey(
-        Insidencia, 
+    incidencia = models.ForeignKey(
+        incidencia, 
         on_delete=models.CASCADE, 
-        related_name="lotes_insidencia", 
-        verbose_name="Insidencia"
+        related_name="lotes_incidencia", 
+        verbose_name="incidencia"
     )
     lote = models.ForeignKey(
         'inventario.LoteInventario', 
         on_delete=models.CASCADE, 
-        related_name="insidencias_lote", 
+        related_name="incidencias_lote", 
         verbose_name="Lote de Inventario"
     )
     cantidad = models.DecimalField(
@@ -1391,4 +1391,4 @@ class InsidenciaLote(BaseModel):
     nota = models.TextField(blank=True, null=True, verbose_name="Nota")
     
     def __str__(self):
-        return f"Insidencia {self.insidencia.pk} - Lote {self.lote.pk} ({'Atendida' if self.atendida else 'Pendiente'})"
+        return f"incidencia {self.incidencia.pk} - Lote {self.lote.pk} ({'Atendida' if self.atendida else 'Pendiente'})"

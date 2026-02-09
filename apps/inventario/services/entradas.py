@@ -3,7 +3,7 @@ from django.utils import timezone
 from datetime import timedelta 
 from decimal import Decimal
 
-from apps.erp.models import Compra, CompraDetalle, OrdenCompra, Almacen,Insidencia, InsidenciaLote, Producto
+from apps.erp.models import Compra, CompraDetalle, OrdenCompra, Almacen,incidencia, IncidenciaLote, Producto
 from apps.inventario.models import LoteInventario, MovimientoInventario, ProductosMovimiento
 
 
@@ -16,7 +16,7 @@ class AbastecimientoService:
         """
         Crea un lote de inventario para la incidencia
         """
-        almacen = Almacen.objects.filter(tipo = Almacen.TIPO_INSIDENCIAS).first()
+        almacen = Almacen.objects.filter(tipo = Almacen.TIPO_INCIDENCIAS).first()
         lote = LoteInventario.objects.create(
             producto=producto,
             almacen=almacen,
@@ -30,16 +30,16 @@ class AbastecimientoService:
         return lote
     
     @staticmethod
-    def _crear_insidencia(productos_incidencias, compra, user):
+    def _crear_incidencia(productos_incidencias, compra, user):
         """
-        Crea una insidencia para los productos con diferencias en la entrada
+        Crea una incidencia para los productos con diferencias en la entrada
         """
         #from apps.erp.models import 
 
         if not productos_incidencias:
             return None
 
-        insidencia = Insidencia.objects.create(
+        incidencia = incidencia.objects.create(
             descripcion=f"Incidencia generada por diferencias en la entrada de la compra {compra.codigo}",
             resuelta=False,
             created_by=user,
@@ -53,8 +53,8 @@ class AbastecimientoService:
                 user=user
             )
             
-            InsidenciaLote.objects.create(
-                insidencia=insidencia,
+            IncidenciaLote.objects.create(
+                incidencia=incidencia,
                 lote=lote,  # No hay lote asociado en este caso
                 #producto=item['producto'],
                 cantidad=item['cantidad'],
@@ -63,7 +63,7 @@ class AbastecimientoService:
                 updated_by=user
             )
 
-        return insidencia
+        return incidencia
     
     @staticmethod
     def validar_compra(compra_id, *, lock=False, nowait=False):
@@ -341,7 +341,7 @@ class AbastecimientoService:
         compra = Compra.objects.get(id=compra_id)
         compra.existe_diferencia = existe_diferencia
         
-        cls._crear_insidencia(productos_incidencias, compra, compra.created_by)
+        cls._crear_incidencia(productos_incidencias, compra, compra.created_by)
         
         
         

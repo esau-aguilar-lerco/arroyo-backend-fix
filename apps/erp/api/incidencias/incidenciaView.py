@@ -11,22 +11,22 @@ from drf_spectacular.utils import extend_schema, inline_serializer, OpenApiParam
 from drf_spectacular.types import OpenApiTypes
 
 from apps.base.models import BaseModel
-from apps.erp.models import Insidencia, InsidenciaLote
-from apps.erp.serializers.insidencias.insidenciaSerializer import (
-    InsidenciaMiniSerializer,
-    InsidenciaDetailSerializer,
-    AtenderInsidenciaLoteSerializer,
+from apps.erp.models import incidencia, IncidenciaLote
+from apps.erp.serializers.incidencias.incidenciaSerializer import (
+    IncidenciaMiniSerializer,
+    IncidenciaDetailSerializer,
+    AtenderIncidenciaLoteSerializer,
 )
 
 
-class InsidenciaListRetrieveAPIView(APIView):
+class IncidenciaListRetrieveAPIView(APIView):
     """
-    Vista para listar y obtener detalle de insidencias
+    Vista para listar y obtener detalle de incidencias
     """
     
     @extend_schema(
-        summary="Listar insidencias",
-        description="Obtiene el listado de insidencias con paginación y filtros",
+        summary="Listar incidencias",
+        description="Obtiene el listado de incidencias con paginación y filtros",
         parameters=[
             OpenApiParameter(
                 name='search',
@@ -44,20 +44,20 @@ class InsidenciaListRetrieveAPIView(APIView):
             ),
         ],
         responses={
-            200: InsidenciaMiniSerializer(many=True),
+            200: IncidenciaMiniSerializer(many=True),
         },
-        tags=['Insidencias']
+        tags=['incidencias']
     )
     def get(self, request, pk=None):
         """
-        Lista todas las insidencias o detalle si se proporciona pk
+        Lista todas las incidencias o detalle si se proporciona pk
         """
         if pk:
             return self.retrieve(request, pk)
         
-        queryset = Insidencia.objects.filter(
+        queryset = incidencia.objects.filter(
             status_model=BaseModel.STATUS_MODEL_ACTIVE
-        ).prefetch_related('lotes_insidencia').order_by('-created_at')
+        ).prefetch_related('lotes_incidencia').order_by('-created_at')
         
         # Filtro por búsqueda
         search = request.query_params.get('search')
@@ -77,73 +77,73 @@ class InsidenciaListRetrieveAPIView(APIView):
         page = paginator.paginate_queryset(queryset, request)
         
         if page is not None:
-            serializer = InsidenciaMiniSerializer(page, many=True)
+            serializer = IncidenciaMiniSerializer(page, many=True)
             return paginator.get_paginated_response(serializer.data)
         
-        serializer = InsidenciaMiniSerializer(queryset, many=True)
+        serializer = IncidenciaMiniSerializer(queryset, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
     
     @extend_schema(
-        summary="Obtener detalle de insidencia",
-        description="Obtiene el detalle completo de una insidencia con sus lotes y productos",
+        summary="Obtener detalle de incidencia",
+        description="Obtiene el detalle completo de una incidencia con sus lotes y productos",
         responses={
-            200: InsidenciaDetailSerializer,
-            404: "Insidencia no encontrada"
+            200: IncidenciaDetailSerializer,
+            404: "incidencia no encontrada"
         },
-        tags=['Insidencias']
+        tags=['incidencias']
     )
     def retrieve(self, request, pk):
         """
-        Obtiene el detalle completo de una insidencia
+        Obtiene el detalle completo de una incidencia
         """
         try:
-            insidencia = Insidencia.objects.select_related(
+            incidencia = incidencia.objects.select_related(
                 'created_by'
             ).prefetch_related(
                 Prefetch(
-                    'lotes_insidencia',
-                    queryset=InsidenciaLote.objects.select_related(
+                    'lotes_incidencia',
+                    queryset=IncidenciaLote.objects.select_related(
                         'lote__producto',
                         'lote__almacen'
                     )
                 )
             ).get(pk=pk, status_model=BaseModel.STATUS_MODEL_ACTIVE)
             
-            serializer = InsidenciaDetailSerializer(insidencia)
+            serializer = IncidenciaDetailSerializer(incidencia)
             return Response(serializer.data, status=status.HTTP_200_OK)
             
-        except Insidencia.DoesNotExist:
+        except incidencia.DoesNotExist:
             return Response(
-                {'detail': 'Insidencia no encontrada.'},
+                {'detail': 'incidencia no encontrada.'},
                 status=status.HTTP_404_NOT_FOUND
             )
 
 
 @extend_schema(
-    summary="Atender lotes de insidencia",
-    description="Marca múltiples lotes de una insidencia como atendidos",
-    request=AtenderInsidenciaLoteSerializer,
+    summary="Atender lotes de incidencia",
+    description="Marca múltiples lotes de una incidencia como atendidos",
+    request=AtenderIncidenciaLoteSerializer,
     responses={
         200: inline_serializer(
-            name='AtenderInsidenciaLoteResponse',
+            name='AtenderIncidenciaLoteResponse',
             fields={
                 'success': serializers.BooleanField(),
                 'message': serializers.CharField(),
                 'lotes_atendidos': serializers.IntegerField(),
-                'insidencias_resueltas': serializers.ListField(child=serializers.IntegerField()),
+                'incidencias_resueltas': serializers.ListField(child=serializers.IntegerField()),
             }
         ),
         400: "Error en los datos proporcionados",
-        404: "Lote de insidencia no encontrado"
+        404: "Lote de incidencia no encontrado"
     },
-    tags=['Insidencias']
+    tags=['incidencias']
 )
 @api_view(['POST'])
-def atender_insidencia_lote(request):
+def atender_incidencia_lote(request):
     """
-    Atiende múltiples lotes de insidencias
+    Atiende múltiples lotes de incidencias
     """
-    serializer = AtenderInsidenciaLoteSerializer(data=request.data)
+    serializer = AtenderIncidenciaLoteSerializer(data=request.data)
     
     if not serializer.is_valid():
         return Response(
@@ -155,74 +155,74 @@ def atender_insidencia_lote(request):
         with transaction.atomic():
             lotes_data = serializer.validated_data['lotes']
             lotes_atendidos = []
-            insidencias_a_verificar = set()
+            incidencias_a_verificar = set()
             
             for item in lotes_data:
-                insidencia_lote_id = item['insidencia_lote_id']
+                incidencia_lote_id = item['incidencia_lote_id']
                 tipificacion = item.get('tipificacion', '').strip()
                 nota = item.get('nota', '')
                 
                 try:
-                    insidencia_lote = InsidenciaLote.objects.select_related(
-                        'insidencia'
-                    ).get(pk=insidencia_lote_id, status_model=BaseModel.STATUS_MODEL_ACTIVE)
-                except InsidenciaLote.DoesNotExist:
+                    incidencia_lote = IncidenciaLote.objects.select_related(
+                        'incidencia'
+                    ).get(pk=incidencia_lote_id, status_model=BaseModel.STATUS_MODEL_ACTIVE)
+                except IncidenciaLote.DoesNotExist:
                     return Response(
-                        {'detail': f'Lote de insidencia con ID {insidencia_lote_id} no encontrado.'},
+                        {'detail': f'Lote de incidencia con ID {incidencia_lote_id} no encontrado.'},
                         status=status.HTTP_404_NOT_FOUND
                     )
                 
-                if insidencia_lote.atendida:
+                if incidencia_lote.atendida:
                     continue  # Saltar lotes ya atendidos
 
                 if not tipificacion:
                     return Response(
-                        {'detail': f'Tipificacion requerida para atender el lote {insidencia_lote_id}.'},
+                        {'detail': f'Tipificacion requerida para atender el lote {incidencia_lote_id}.'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
-                insidencia = insidencia_lote.insidencia
-                if not insidencia.descripcion or not insidencia.descripcion.strip():
-                    insidencia.descripcion = tipificacion
-                    insidencia.save(update_fields=['descripcion'])
-                elif insidencia.descripcion.strip() != tipificacion:
+                incidencia = incidencia_lote.incidencia
+                if not incidencia.descripcion or not incidencia.descripcion.strip():
+                    incidencia.descripcion = tipificacion
+                    incidencia.save(update_fields=['descripcion'])
+                elif incidencia.descripcion.strip() != tipificacion:
                     return Response(
                         {
                             'detail': (
-                                f"Tipificacion no coincide con la incidencia #{insidencia.id}. "
-                                f"Actual: '{insidencia.descripcion}'"
+                                f"Tipificacion no coincide con la incidencia #{incidencia.id}. "
+                                f"Actual: '{incidencia.descripcion}'"
                             )
                         },
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 
                 # Marcar como atendido
-                insidencia_lote.atendida = True
-                insidencia_lote.fecha_atencion = timezone.now()
+                incidencia_lote.atendida = True
+                incidencia_lote.fecha_atencion = timezone.now()
                 if nota:
-                    insidencia_lote.nota = nota
-                insidencia_lote.save()
+                    incidencia_lote.nota = nota
+                incidencia_lote.save()
                 
-                lotes_atendidos.append(insidencia_lote.id)
-                insidencias_a_verificar.add(insidencia_lote.insidencia_id)
+                lotes_atendidos.append(incidencia_lote.id)
+                incidencias_a_verificar.add(incidencia_lote.incidencia_id)
             
-            # Verificar si las insidencias están completamente resueltas
-            insidencias_resueltas = []
-            for insidencia_id in insidencias_a_verificar:
-                insidencia = Insidencia.objects.get(pk=insidencia_id)
-                lotes_pendientes = insidencia.lotes_insidencia.filter(atendida=False).exists()
+            # Verificar si las incidencias están completamente resueltas
+            incidencias_resueltas = []
+            for incidencia_id in incidencias_a_verificar:
+                incidencia = incidencia.objects.get(pk=incidencia_id)
+                lotes_pendientes = incidencia.lotes_incidencia.filter(atendida=False).exists()
                 
-                if not lotes_pendientes and not insidencia.resuelta:
-                    insidencia.resuelta = True
-                    insidencia.save()
-                    insidencias_resueltas.append(insidencia_id)
+                if not lotes_pendientes and not incidencia.resuelta:
+                    incidencia.resuelta = True
+                    incidencia.save()
+                    incidencias_resueltas.append(incidencia_id)
             
             return Response({
                 'success': True,
                 'message': f'{len(lotes_atendidos)} lote(s) atendido(s) correctamente',
                 'lotes_atendidos': len(lotes_atendidos),
                 'lotes_ids': lotes_atendidos,
-                'insidencias_resueltas': insidencias_resueltas,
+                'incidencias_resueltas': incidencias_resueltas,
             }, status=status.HTTP_200_OK)
             
     except Exception as e:

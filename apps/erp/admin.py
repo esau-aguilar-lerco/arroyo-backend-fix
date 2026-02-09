@@ -6,7 +6,7 @@ from .models import (
     Notificacion,
     Caja, CajaApertura, CajaTransaccion,
     Venta, VentaDetalle, VentaDetalleLote, PagosVenta,
-    Insidencia, InsidenciaLote,
+    incidencia, IncidenciaLote,
 )
 @admin.register(Empresa)
 class EmpresaAdmin(admin.ModelAdmin):
@@ -1195,14 +1195,14 @@ class PagosVentaAdmin(admin.ModelAdmin):
 
 
 # =======================================================================
-#                    ADMIN DE INSIDENCIAS
+#                    ADMIN DE incidencias
 # =======================================================================
 
-class InsidenciaLoteInline(admin.TabularInline):
+class IncidenciaLoteInline(admin.TabularInline):
     """
-    Inline para agregar lotes a una insidencia
+    Inline para agregar lotes a una incidencia
     """
-    model = InsidenciaLote
+    model = IncidenciaLote
     extra = 1
     autocomplete_fields = ['lote']
     fields = ('lote', 'cantidad', 'atendida', 'fecha_atencion', 'nota')
@@ -1212,10 +1212,10 @@ class InsidenciaLoteInline(admin.TabularInline):
         return super().get_queryset(request).select_related('lote__producto', 'lote__almacen')
 
 
-@admin.register(Insidencia)
-class InsidenciaAdmin(admin.ModelAdmin):
+@admin.register(incidencia)
+class IncidenciaAdmin(admin.ModelAdmin):
     """
-    Admin para gestionar Insidencias
+    Admin para gestionar incidencias
     """
     list_display = (
         'id', 'descripcion_corta', 'resuelta', 'total_lotes', 
@@ -1225,12 +1225,12 @@ class InsidenciaAdmin(admin.ModelAdmin):
     search_fields = ('descripcion', 'solucion')
     ordering = ('-created_at',)
     readonly_fields = ('created_at', 'updated_at', 'created_by', 'updated_by')
-    inlines = [InsidenciaLoteInline]
+    inlines = [IncidenciaLoteInline]
     
     fieldsets = (
-        ('Información de la Insidencia', {
+        ('Información de la incidencia', {
             'fields': ('descripcion', 'solucion', 'resuelta'),
-            'description': 'Datos principales de la insidencia'
+            'description': 'Datos principales de la incidencia'
         }),
         ('Auditoría', {
             'fields': ('created_at', 'updated_at', 'created_by', 'updated_by', 'status_model'),
@@ -1246,14 +1246,14 @@ class InsidenciaAdmin(admin.ModelAdmin):
     descripcion_corta.short_description = 'Descripción'
     
     def total_lotes(self, obj):
-        """Mostrar total de lotes en la insidencia"""
-        return obj.lotes_insidencia.count()
+        """Mostrar total de lotes en la incidencia"""
+        return obj.lotes_incidencia.count()
     total_lotes.short_description = 'Total Lotes'
     
     def lotes_atendidos(self, obj):
         """Mostrar cantidad de lotes atendidos"""
-        atendidos = obj.lotes_insidencia.filter(atendida=True).count()
-        total = obj.lotes_insidencia.count()
+        atendidos = obj.lotes_incidencia.filter(atendida=True).count()
+        total = obj.lotes_incidencia.count()
         return f"{atendidos}/{total}"
     lotes_atendidos.short_description = 'Atendidos'
     
@@ -1264,29 +1264,29 @@ class InsidenciaAdmin(admin.ModelAdmin):
         super().save_model(request, obj, form, change)
 
 
-@admin.register(InsidenciaLote)
-class InsidenciaLoteAdmin(admin.ModelAdmin):
+@admin.register(IncidenciaLote)
+class IncidenciaLoteAdmin(admin.ModelAdmin):
     """
-    Admin para gestionar Lotes de Insidencias individualmente
+    Admin para gestionar Lotes de incidencias individualmente
     """
     list_display = (
-        'id', 'insidencia_id', 'lote_info', 'producto_nombre', 
+        'id', 'incidencia_id', 'lote_info', 'producto_nombre', 
         'cantidad', 'atendida', 'fecha_atencion', 'status_model'
     )
     list_filter = ('atendida', 'status_model', 'created_at')
     search_fields = (
-        'insidencia__descripcion', 
+        'incidencia__descripcion', 
         'lote__producto__nombre', 
         'lote__producto__codigo',
         'nota'
     )
     ordering = ('-created_at',)
-    autocomplete_fields = ['insidencia', 'lote']
+    autocomplete_fields = ['incidencia', 'lote']
     readonly_fields = ('fecha_atencion', 'created_at', 'updated_at')
     
     fieldsets = (
         ('Relaciones', {
-            'fields': ('insidencia', 'lote'),
+            'fields': ('incidencia', 'lote'),
         }),
         ('Detalles', {
             'fields': ('cantidad', 'atendida', 'fecha_atencion', 'nota'),
@@ -1297,10 +1297,10 @@ class InsidenciaLoteAdmin(admin.ModelAdmin):
         })
     )
     
-    def insidencia_id(self, obj):
-        return f"Insidencia #{obj.insidencia.id}"
-    insidencia_id.short_description = 'Insidencia'
-    insidencia_id.admin_order_field = 'insidencia__id'
+    def incidencia_id(self, obj):
+        return f"incidencia #{obj.incidencia.id}"
+    incidencia_id.short_description = 'incidencia'
+    incidencia_id.admin_order_field = 'incidencia__id'
     
     def lote_info(self, obj):
         if obj.lote:

@@ -13,6 +13,6 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='almacen',
             name='tipo',
-            field=models.CharField(blank=True, choices=[('FIJO', 'FIJO'), ('VIRT', 'VIRTUAL'), ('RUTA', 'RUTA'), ('COMP', 'COMPRA'), ('HELP', 'HELP CEDIS'), ('EMBA', 'EMBARQUE'), ('TRAS', 'TRASPASO'), ('INSD', 'INSIDENCIAS')], default='FIJO', max_length=4, null=True, verbose_name='Tipo de almacen'),
+            field=models.CharField(blank=True, choices=[('FIJO', 'FIJO'), ('VIRT', 'VIRTUAL'), ('RUTA', 'RUTA'), ('COMP', 'COMPRA'), ('HELP', 'HELP CEDIS'), ('EMBA', 'EMBARQUE'), ('TRAS', 'TRASPASO'), ('INSD', 'incidencias')], default='FIJO', max_length=4, null=True, verbose_name='Tipo de almacen'),
         ),
     ]
