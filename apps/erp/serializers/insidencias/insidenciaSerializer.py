@@ -2,6 +2,18 @@ from rest_framework import serializers
 from apps.erp.models import Insidencia, InsidenciaLote
 
 
+TIPIFICACIONES_INSIDENCIA = [
+    "Producto danado",
+    "Caducado/Vencido",
+    "Empaque danado/abierto",
+    "Temperatura inadecuada",
+    "Faltante de producto",
+    "Producto incorrecto",
+    "Contaminacion",
+    "Otro",
+]
+
+
 class InsidenciaMiniSerializer(serializers.ModelSerializer):
     """
     Serializer liviano para listado de insidencias
@@ -105,6 +117,10 @@ class AtenderInsidenciaLoteItemSerializer(serializers.Serializer):
     Serializer para un item de lote a atender
     """
     insidencia_lote_id = serializers.IntegerField(help_text="ID del InsidenciaLote a atender")
+    tipificacion = serializers.ChoiceField(
+        choices=[(t, t) for t in TIPIFICACIONES_INSIDENCIA],
+        help_text="Tipificacion obligatoria para describir la insidencia"
+    )
     nota = serializers.CharField(required=False, allow_blank=True, allow_null=True, help_text="Nota de atención (opcional)")
 
 

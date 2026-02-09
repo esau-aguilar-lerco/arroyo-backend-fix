@@ -159,6 +159,7 @@ def atender_insidencia_lote(request):
             
             for item in lotes_data:
                 insidencia_lote_id = item['insidencia_lote_id']
+                tipificacion = item.get('tipificacion', '').strip()
                 nota = item.get('nota', '')
                 
                 try:
@@ -173,6 +174,27 @@ def atender_insidencia_lote(request):
                 
                 if insidencia_lote.atendida:
                     continue  # Saltar lotes ya atendidos
+
+                if not tipificacion:
+                    return Response(
+                        {'detail': f'Tipificacion requerida para atender el lote {insidencia_lote_id}.'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                insidencia = insidencia_lote.insidencia
+                if not insidencia.descripcion or not insidencia.descripcion.strip():
+                    insidencia.descripcion = tipificacion
+                    insidencia.save(update_fields=['descripcion'])
+                elif insidencia.descripcion.strip() != tipificacion:
+                    return Response(
+                        {
+                            'detail': (
+                                f"Tipificacion no coincide con la incidencia #{insidencia.id}. "
+                                f"Actual: '{insidencia.descripcion}'"
+                            )
+                        },
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
                 
                 # Marcar como atendido
                 insidencia_lote.atendida = True

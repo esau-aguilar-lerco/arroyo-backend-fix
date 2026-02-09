@@ -40,30 +40,56 @@ def create_movimiento_entrada(model_movimiento,productos_con_lote, user=None,ref
         lotes_incidencias = []
         for detalle in productos_con_lote:
             producto = detalle['producto']
-            cantidad_producto = detalle['cantidad']
             lotes = detalle['lotes']
             
             for lote_data in lotes:
-                lote = lote_data['lote']
+                lote_origen = lote_data['lote']
                 cantidad = lote_data['cantidad']
-                if lote.cantidad < cantidad:
-                    # Registrar incidencia por cantidad insuficiente en el lote
+
+                # En traspasos usar el lote del almacén virtual para no tocar CEDIS
+                lote = lote_origen
+                if model_movimento_vir is not None:
+                    ref_virtual = f"TRASP-{model_movimiento.id}-ORIG-{lote_origen.id}"
+                    lote_virtual = LoteInventario.objects.filter(
+                        almacen=model_movimento_vir.almacen_destino,
+                        referencia=ref_virtual
+                    ).first()
+                    if lote_virtual:
+                        lote = lote_virtual
+                    else:
+                        # Fallback para traspasos antiguos sin referencia
+                        lote_virtual = LoteInventario.objects.filter(
+                            almacen=model_movimento_vir.almacen_destino,
+                            producto=producto,
+                            cantidad__gt=0
+                        ).order_by('fecha_ingreso').first()
+                        if lote_virtual:
+                            lote = lote_virtual
+
+                cantidad_enviada = lote.cantidad
+
+                # Validar que la cantidad solicitada no exceda el lote disponible
+                if cantidad_enviada < cantidad:
+                    raise ValueError(
+                        f"Cantidad solicitada ({cantidad}) excede disponible ({cantidad_enviada}) "
+                        f"en lote {lote.id} para producto {producto.nombre}."
+                    )
+
+                # Si se recibe menos de lo enviado, lo restante va a incidencias
+                diferencia = cantidad_enviada - cantidad
+                if diferencia > 0:
                     lotes_incidencias.append({
                         'producto': producto,
-                        'cantidad': lote.cantidad - cantidad,
+                        'cantidad': diferencia,
                         'costo_unitario': lote.costo_unitario,
                         'referencia_lote': lote,
                     })
-                    print(f"Incidencia en lote {lote.id} para producto {producto.nombre}: solicitado {cantidad}, disponible {lote.cantidad}")
-                    cantidad = lote.cantidad  # Ajustar a la cantidad disponible
-                
-                # Lógica para actualizar el lote y el inventario
-                # Por ejemplo, aumentar la cantidad en el lote
+
+                # Mover el lote al almacén destino.
+                # Resetear cantidad a 0 para que el ProductosMovimiento (ENTRADA) la sume una sola vez.
                 lote.almacen = almacen_destino
                 lote.updated_by = user
-                print("ANTES:", lote.cantidad)
                 lote.cantidad = 0
-                print("DESPUES:", lote.cantidad)
                 count_cantidad += cantidad
                 lote.save()
                 
@@ -130,7 +156,7 @@ def _crear_insidencia(productos_incidencias, almacen, movimiento, user):
             return None
 
         insidencia = Insidencia.objects.create(
-            descripcion=f"Incidencia generada por producto faltante en el abastecimiento [{movimiento.id}]",
+            descripcion="",
             resuelta=False,
             created_by=user,
             #updated_by=user

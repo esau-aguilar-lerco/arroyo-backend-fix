@@ -70,7 +70,7 @@ class ProductosSolicitudSerializer(BaseSerializer):
     # Validaciones para campos específicos
     cantidad = serializers.DecimalField(
         max_digits=10, 
-        decimal_places=2, 
+        decimal_places=3, 
         min_value=Decimal('0.01'),
         help_text="Cantidad solicitada del producto"
     )

@@ -388,15 +388,23 @@ class VentaSerializer(BaseSerializer):
         
         for pago_data in pagos_data:
             PagosVenta.objects.create(venta=venta, created_by_id=request.user.id, **pago_data)
-        # 🔑 Recalcular condición de pago según pagos
+        # 🔑 Recalcular condición de pago según métodos usados
         total_pagado = sum(
             Decimal(str(p['monto'])) for p in pagos_data
         )
+        tiene_credito = any(getattr(p.get('metodo_pago'), 'is_credito', False) for p in pagos_data)
+        tiene_no_credito = any(not getattr(p.get('metodo_pago'), 'is_credito', False) for p in pagos_data)
 
-        if total_pagado >= venta.total:
-            venta.condicion_pago = CondicionPago.CONDICION_CONTADO
-        else:
+        if tiene_credito and tiene_no_credito:
+            venta.condicion_pago = CondicionPago.CONDICION_MIXTA
+        elif tiene_credito:
             venta.condicion_pago = CondicionPago.CONDICION_CREDITO
+        else:
+            venta.condicion_pago = (
+                CondicionPago.CONDICION_CONTADO
+                if total_pagado >= venta.total
+                else CondicionPago.CONDICION_CREDITO
+            )
 
         venta.save(update_fields=["condicion_pago"])
 
@@ -432,12 +440,21 @@ class VentaSerializer(BaseSerializer):
                 PagosVenta.objects.create(venta=instance, created_by_id=request.user.id, **pago_data)
 
         # 🔑 Recalcular condición de pago en updates
-        total_pagado = sum(p.monto for p in instance.pagos.all())
+        pagos_actuales = list(instance.pagos.all())
+        total_pagado = sum(p.monto for p in pagos_actuales)
+        tiene_credito = any(p.metodo_pago and p.metodo_pago.is_credito for p in pagos_actuales)
+        tiene_no_credito = any(p.metodo_pago and not p.metodo_pago.is_credito for p in pagos_actuales)
 
-        if total_pagado >= instance.total:
-            instance.condicion_pago = CondicionPago.CONDICION_CONTADO
-        else:
+        if tiene_credito and tiene_no_credito:
+            instance.condicion_pago = CondicionPago.CONDICION_MIXTA
+        elif tiene_credito:
             instance.condicion_pago = CondicionPago.CONDICION_CREDITO
+        else:
+            instance.condicion_pago = (
+                CondicionPago.CONDICION_CONTADO
+                if total_pagado >= instance.total
+                else CondicionPago.CONDICION_CREDITO
+            )
 
         instance.save(update_fields=["condicion_pago"])
         return instance

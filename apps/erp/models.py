@@ -194,11 +194,10 @@ class Producto(BaseModel):
 
     @property
     def dias_caducidad(self):
-        return self.horas_caducidad 
         """Retorna las horas de caducidad convertidas a días (redondeando hacia arriba)"""
         if self.horas_caducidad and self.horas_caducidad > 0:
-            return self.horas_caducidad // 24
-        return 0
+            return self.horas_caducidad // 24        
+        return self.horas_caducidad 
 
     def __str__(self):
         return f"({self.codigo}) {self.nombre} - {(self.unidad_sat.clave if self.unidad_sat else '')}"
@@ -876,7 +875,7 @@ class CompraDetalle(models.Model):
     subtotal = models.DecimalField(max_digits=25, decimal_places=5, verbose_name="Subtotal", editable=False)
     existe_diferencia = models.BooleanField(default=False, verbose_name="Existe Diferencia")
     es_producto_nuevo = models.BooleanField(default=False, verbose_name="Es Nuevo")
-    cantidad_entrada = models.DecimalField(max_digits=25, decimal_places=2, verbose_name="Diferencia", default=0.00)
+    cantidad_entrada = models.DecimalField(max_digits=25, decimal_places=3, verbose_name="Diferencia", default=0.00)
     def save(self, *args, **kwargs):
         self.subtotal = self.cantidad * self.precio_unitario
         super().save(*args, **kwargs)
@@ -1383,7 +1382,7 @@ class InsidenciaLote(BaseModel):
     )
     cantidad = models.DecimalField(
         max_digits=20, 
-        decimal_places=2, 
+        decimal_places=3, 
         default=0, 
         verbose_name="Cantidad Afectada"
     )

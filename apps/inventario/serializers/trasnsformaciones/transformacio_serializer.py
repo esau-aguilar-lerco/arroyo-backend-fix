@@ -111,6 +111,18 @@ class TransformacionCreateSerializer(serializers.Serializer):
         productos_salida = data.get('productos_salida', [])
         if tipo == TRANSFORMACION and  len(productos_salida) == 0:
             raise serializers.ValidationError("Para una transformación, debe proporcionar al menos un producto de salida.")
+
+        if tipo == TRANSFORMACION:
+            total_entrada = sum(
+                [Decimal(str(item.get('cantidad') or 0)) for item in data.get('productos_entrada', [])]
+            )
+            total_salida = sum(
+                [Decimal(str(item.get('cantidad') or 0)) for item in productos_salida]
+            )
+            if total_salida > total_entrada:
+                raise serializers.ValidationError(
+                    "La cantidad total de salida no puede ser mayor que la cantidad total de entrada."
+                )
         
         return data
     
