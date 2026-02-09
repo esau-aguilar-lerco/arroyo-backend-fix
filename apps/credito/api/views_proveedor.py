@@ -2,7 +2,7 @@ from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from django.db.models import Q, Sum, Count
+from django.db.models import Q, Sum, Count, Max, Min
 from django.utils import timezone
 from datetime import timedelta
 
@@ -85,6 +85,59 @@ class CreditoProveedorViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, 
         if self.action == 'retrieve':
             return CreditoProveedorSerializer
         return CreditoProveedorMiniSerializer
+
+    def _agrupar_por_proveedor(self, queryset):
+        """
+        Agrupar créditos por proveedor con totales consolidados
+        """
+        hoy = timezone.now().date()
+        agrupados = (
+            queryset.values('proveedor_id', 'proveedor__codigo', 'proveedor__nombre')
+            .annotate(
+                total_creditos=Count('id'),
+                total_dispersado=Sum('monto'),
+                total_pagado=Sum('monto_pagado'),
+                fecha_ultimo_credito=Max('fecha'),
+                fecha_vencimiento_proxima=Min('fecha_vencimiento', filter=Q(is_pagado=False)),
+                creditos_vencidos=Count('id', filter=Q(is_pagado=False, fecha_vencimiento__lt=hoy)),
+                creditos_activos=Count('id', filter=Q(is_pagado=False, fecha_vencimiento__gte=hoy)),
+            )
+            .order_by('proveedor__nombre')
+        )
+
+        resultados = []
+        for item in agrupados:
+            total_dispersado = item['total_dispersado'] or 0
+            total_pagado = item['total_pagado'] or 0
+            adeudo = total_dispersado - total_pagado
+            if adeudo <= 0:
+                estado = 'PAGADA'
+            elif (item['creditos_vencidos'] or 0) > 0:
+                estado = 'VENCIDA'
+            else:
+                estado = 'ACTIVA'
+
+            resultados.append({
+                'proveedor': {
+                    'id': item['proveedor_id'],
+                    'codigo': item['proveedor__codigo'],
+                    'nombre': item['proveedor__nombre']
+                },
+                'total_creditos': item['total_creditos'] or 0,
+                'total_dispersado': float(total_dispersado),
+                'total_pagado': float(total_pagado),
+                'adeudo': float(adeudo),
+                'fecha_ultimo_credito': item['fecha_ultimo_credito'],
+                'fecha_vencimiento_proxima': item['fecha_vencimiento_proxima'],
+                'creditos_vencidos': item['creditos_vencidos'] or 0,
+                'creditos_activos': item['creditos_activos'] or 0,
+                'estado': estado
+            })
+
+        page = self.paginate_queryset(resultados)
+        if page is not None:
+            return self.get_paginated_response(page)
+        return Response(resultados)
     
     @extend_schema(
         summary="Listar créditos de proveedores",
@@ -206,12 +259,16 @@ class CreditoProveedorViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, 
         if search:
             queryset = self.filter_queryset(queryset)
         
+        agrupado = request.query_params.get('agrupado')
+        if agrupado and agrupado.lower() == 'true':
+            return self._agrupar_por_proveedor(queryset)
+
         # Paginar y retornar
         page = self.paginate_queryset(queryset)
         if page is not None:
             serializer = self.get_serializer(page, many=True)
             return self.get_paginated_response(serializer.data)
-        
+
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
     
@@ -269,11 +326,19 @@ class CreditoProveedorViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, 
         if dia_fin:
             queryset = queryset.filter(fecha__lte=dia_fin)
         
+        search = request.query_params.get('search')
+        if search:
+            queryset = self.filter_queryset(queryset)
+        
+        agrupado = request.query_params.get('agrupado')
+        if agrupado and agrupado.lower() == 'true':
+            return self._agrupar_por_proveedor(queryset)
+
         page = self.paginate_queryset(queryset)
         if page is not None:
             serializer = CreditoProveedorListSerializer(page, many=True)
             return self.get_paginated_response(serializer.data)
-        
+
         serializer = CreditoProveedorListSerializer(queryset, many=True)
         return Response(serializer.data)
     
@@ -314,11 +379,19 @@ class CreditoProveedorViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, 
         if dia_fin:
             queryset = queryset.filter(fecha__lte=dia_fin)
         
+        search = request.query_params.get('search')
+        if search:
+            queryset = self.filter_queryset(queryset)
+        
+        agrupado = request.query_params.get('agrupado')
+        if agrupado and agrupado.lower() == 'true':
+            return self._agrupar_por_proveedor(queryset)
+
         page = self.paginate_queryset(queryset)
         if page is not None:
             serializer = CreditoProveedorListSerializer(page, many=True)
             return self.get_paginated_response(serializer.data)
-        
+
         serializer = CreditoProveedorListSerializer(queryset, many=True)
         return Response(serializer.data)
     
