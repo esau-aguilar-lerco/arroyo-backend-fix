@@ -41,6 +41,7 @@ class PagosCreditoProveedorSerializer(serializers.ModelSerializer):
             'proveedor',
             'monto',
             'metodo_pago',
+            'referencia',
             'fecha_pago',
             'created_by_nombre',
             'token'
@@ -183,12 +184,14 @@ class PagoCreditoProveedorCreateSingularSerializer(serializers.Serializer):
         for pago_data in pagos:
             metodo_pago = pago_data['metodo_pago']
             monto_pago = Decimal(str(pago_data['monto']))
+            referencia = pago_data.get('referencia')
             
             # Crear registro de pago
             pago_obj = PagosCreditoProveedor.objects.create(
                 credito_proveedor=credito,
                 monto=monto_pago,
                 metodo_pago=metodo_pago,
+                referencia=referencia,
                 created_by=usuario
             )
             pagos_registrados.append(pago_obj)

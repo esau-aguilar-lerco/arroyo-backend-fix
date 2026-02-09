@@ -186,6 +186,7 @@ class PagosCreditoProveedor(BaseModel):
     )
     monto = models.DecimalField(max_digits=20, decimal_places=2)
     metodo_pago = models.ForeignKey(MetodoPago, on_delete=models.SET_NULL, null=True, blank=True)
+    referencia = models.CharField(max_length=100, blank=True, null=True)
     token = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
     
     
