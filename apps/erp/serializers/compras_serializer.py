@@ -152,7 +152,8 @@ class OrdenCompraSerializer(BaseSerializer):
     detalles = OrdenCompraDetalleSerializer(many=True, required=True)
     
     # Campos calculados
-    #total_calculado = serializers.SerializerMethodField()
+    total = serializers.SerializerMethodField()
+    total_calculado = serializers.SerializerMethodField()
     total_productos = serializers.SerializerMethodField()
     pagos_detalle = serializers.SerializerMethodField()
     
@@ -160,12 +161,12 @@ class OrdenCompraSerializer(BaseSerializer):
         model = OrdenCompra
         fields = [
             'id', 'codigo', 'proveedor', 'proveedor_obj', 'estado', 
-             'total_productos',
+             'total', 'total_calculado', 'total_productos',
             'encargado', 'encargado_obj','condicion_pago',
             'detalles', 'created_at', 'updated_at', 'created_by', 'updated_by',
              'pagos','pagos_detalle','pagar_con_credito','pago_credito'
         ]
-        read_only_fields = ('id', 'codigo', 'total_productos', 'created_at', 'updated_at', 'created_by', 'updated_by', 'estado')
+        read_only_fields = ('id', 'codigo', 'total', 'total_calculado', 'total_productos', 'created_at', 'updated_at', 'created_by', 'updated_by', 'estado')
 
     def get_pagos_detalle(self, obj):
         """
@@ -192,6 +193,28 @@ class OrdenCompraSerializer(BaseSerializer):
         if hasattr(obj, 'detalles'):
             return obj.detalles.count()
         return 0
+
+    def get_total_calculado(self, obj):
+        """
+        Total calculado a partir de los detalles.
+        """
+        total = Decimal('0.00')
+        if hasattr(obj, 'detalles'):
+            for detalle in obj.detalles.all():
+                cantidad = detalle.cantidad or Decimal('0.00')
+                precio = detalle.precio or Decimal('0.00')
+                total += cantidad * precio
+        return total
+
+    def get_total(self, obj):
+        """
+        Total mostrado en la orden. Si existe un campo total persistido, úsalo;
+        en caso contrario, usa el total calculado.
+        """
+        total_attr = getattr(obj, 'total', None)
+        if total_attr not in (None, ''):
+            return total_attr
+        return self.get_total_calculado(obj)
 
     def validate_detalles(self, detalles):
         """

@@ -3,7 +3,7 @@ from django.utils import timezone
 from datetime import timedelta 
 from decimal import Decimal
 
-from apps.erp.models import Compra, CompraDetalle, OrdenCompra, Almacen,incidencia, IncidenciaLote, Producto
+from apps.erp.models import Compra, CompraDetalle, OrdenCompra, Almacen, incidencia as IncidenciaModel, IncidenciaLote, Producto
 from apps.inventario.models import LoteInventario, MovimientoInventario, ProductosMovimiento
 
 
@@ -39,7 +39,7 @@ class AbastecimientoService:
         if not productos_incidencias:
             return None
 
-        incidencia = incidencia.objects.create(
+        incidencia_obj = IncidenciaModel.objects.create(
             descripcion=f"Incidencia generada por diferencias en la entrada de la compra {compra.codigo}",
             resuelta=False,
             created_by=user,
@@ -54,7 +54,7 @@ class AbastecimientoService:
             )
             
             IncidenciaLote.objects.create(
-                incidencia=incidencia,
+                incidencia=incidencia_obj,
                 lote=lote,  # No hay lote asociado en este caso
                 #producto=item['producto'],
                 cantidad=item['cantidad'],
@@ -63,7 +63,7 @@ class AbastecimientoService:
                 updated_by=user
             )
 
-        return incidencia
+        return incidencia_obj
     
     @staticmethod
     def validar_compra(compra_id, *, lock=False, nowait=False):

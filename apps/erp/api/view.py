@@ -5,6 +5,7 @@ from rest_framework import mixins,viewsets,permissions, status, filters, seriali
 from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView
 from django.db import models
+from django.db.models.functions import Coalesce
 
 from drf_spectacular.utils import extend_schema, inline_serializer,OpenApiParameter, OpenApiExample
 from drf_spectacular.types import OpenApiTypes
@@ -1630,6 +1631,132 @@ class CompraViewSet(viewsets.ModelViewSet):
         
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Historial de compras por proveedor",
+        description="Devuelve proveedores con totales de compras y estadísticas generales para historial.",
+        parameters=[
+            OpenApiParameter(
+                name='search',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                description='Buscar por nombre o código de proveedor',
+                required=False,
+            ),
+            OpenApiParameter(
+                name='proveedor',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                description='Filtra el historial por un proveedor específico',
+                required=False,
+            ),
+        ],
+        responses={
+            200: inline_serializer(
+                name='HistorialComprasProveedorResponse',
+                fields={
+                    'count': serializers.IntegerField(),
+                    'next': serializers.CharField(allow_null=True, required=False),
+                    'previous': serializers.CharField(allow_null=True, required=False),
+                    'estadisticas': inline_serializer(
+                        name='HistorialComprasStats',
+                        fields={
+                            'total_compras': serializers.IntegerField(),
+                            'total_monto': serializers.DecimalField(max_digits=25, decimal_places=2),
+                            'total_finalizadas': serializers.IntegerField(),
+                            'total_canceladas': serializers.IntegerField(),
+                            'total_en_camino': serializers.IntegerField(),
+                            'total_procesando': serializers.IntegerField(),
+                        }
+                    ),
+                    'results': serializers.ListField(),
+                }
+            )
+        },
+    )
+    @action(detail=False, methods=['get'], url_path='historial-proveedores')
+    def historial_proveedores(self, request):
+        search = request.query_params.get('search', None)
+        proveedor_id = request.query_params.get('proveedor', None)
+
+        proveedores_qs = Proveedor.objects.filter(status_model=BaseModel.STATUS_MODEL_ACTIVE)
+        if search:
+            proveedores_qs = proveedores_qs.filter(
+                models.Q(nombre__icontains=search) | models.Q(codigo__icontains=search)
+            )
+
+        if proveedor_id:
+            try:
+                proveedor_id = int(proveedor_id)
+            except (TypeError, ValueError):
+                return Response(
+                    {'detail': 'proveedor debe ser un número entero'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            proveedores_qs = proveedores_qs.filter(id=proveedor_id)
+
+        compras_base = Compra.objects.exclude(status_model=BaseModel.STATUS_MODEL_DELETE)
+        if proveedor_id:
+            compras_base = compras_base.filter(proveedor_id=proveedor_id)
+
+        decimal_zero = models.Value(0, output_field=models.DecimalField(max_digits=25, decimal_places=2))
+        estadisticas = compras_base.aggregate(
+            total_compras=models.Count('id'),
+            total_monto=Coalesce(models.Sum('total'), decimal_zero),
+            total_finalizadas=models.Count('id', filter=models.Q(estado=Compra.FINALIZADA)),
+            total_canceladas=models.Count('id', filter=models.Q(estado=Compra.CANCELED)),
+            total_en_camino=models.Count('id', filter=models.Q(estado=Compra.EN_CAMINO)),
+            total_procesando=models.Count('id', filter=models.Q(estado=Compra.PROCESANDO)),
+        )
+
+        last_compra = Compra.objects.filter(
+            proveedor_id=models.OuterRef('pk'),
+            status_model=BaseModel.STATUS_MODEL_ACTIVE
+        ).order_by('-created_at')
+
+        proveedores_qs = proveedores_qs.annotate(
+            total_compras=Coalesce(
+                models.Count('compras', filter=models.Q(compras__status_model=BaseModel.STATUS_MODEL_ACTIVE)), 0
+            ),
+            total_monto=Coalesce(
+                models.Sum('compras__total', filter=models.Q(compras__status_model=BaseModel.STATUS_MODEL_ACTIVE)), decimal_zero
+            ),
+            ultima_compra=models.Subquery(last_compra.values('created_at')[:1]),
+            ultimo_estado=models.Subquery(last_compra.values('estado')[:1]),
+        ).filter(total_compras__gt=0).order_by('-ultima_compra')
+
+        def serialize_proveedor(proveedor):
+            return {
+                'proveedor': {
+                    'id': proveedor.id,
+                    'codigo': proveedor.codigo,
+                    'nombre': proveedor.nombre,
+                    'full_name': proveedor.full_name if hasattr(proveedor, 'full_name') else proveedor.nombre,
+                },
+                'total_compras': proveedor.total_compras or 0,
+                'total_monto': proveedor.total_monto or 0,
+                'ultima_compra': proveedor.ultima_compra,
+                'ultimo_estado': proveedor.ultimo_estado,
+            }
+
+        page = self.paginate_queryset(proveedores_qs)
+        if page is not None:
+            results = [serialize_proveedor(item) for item in page]
+            response = self.get_paginated_response(results)
+            response.data['estadisticas'] = estadisticas
+            return response
+
+        results = [serialize_proveedor(item) for item in proveedores_qs]
+        return Response(
+            {
+                'count': proveedores_qs.count(),
+                'next': None,
+                'previous': None,
+                'estadisticas': estadisticas,
+                'results': results,
+            },
+            status=status.HTTP_200_OK
+        )
 
     def retrieve(self, request, *args, **kwargs):
         """

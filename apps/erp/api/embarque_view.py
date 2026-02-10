@@ -100,6 +100,9 @@ class EmbarqueListCreateAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         except Exception as e:
+            import traceback
+            print(f"❌ [EMBARQUE ERROR] {str(e)}")
+            print(f"❌ [EMBARQUE TRACEBACK]\n{traceback.format_exc()}")
             return Response(
                 {'detail': f'Error interno: {str(e)}'},
                 status=status.HTTP_400_BAD_REQUEST
@@ -230,10 +233,10 @@ def listar_preventas_con_detalles_carga(request):
                 )
             filtros['ruta_id'] = ruta.id
 
-        almacen = ruta.almacen_embarque
+        almacen_pedidos = ruta.almacen_embarque
         print(f"almacen de pedidos (ruta): {ruta.almacen_embarque} | almacen usuario: {user.almacen}")
         
-        if not almacen:
+        if not almacen_pedidos:
             return Response(
                 {'detail': 'No hay almacén de pedidos configurado para la ruta.'},
                 status=status.HTTP_400_BAD_REQUEST
@@ -241,11 +244,11 @@ def listar_preventas_con_detalles_carga(request):
         
         # Query optimizada
         preventas = Venta.objects.filter(
-            **filtros,
-            detalles__is_cargado=False
+            **filtros
         ).select_related(
-            'cliente', 
-            'ruta'
+            'cliente',
+            'ruta',
+            'almacen'
         ).prefetch_related(
             'detalles__producto__unidad_sat'
         ).distinct().order_by('-created_at')
@@ -287,7 +290,7 @@ def listar_preventas_con_detalles_carga(request):
         preventas_data = []
 
         for preventa in preventas:
-            detalles = preventa.detalles.all()
+            detalles = preventa.detalles.filter(is_cargado=False)
             
             if not detalles:
                 continue
@@ -297,6 +300,8 @@ def listar_preventas_con_detalles_carga(request):
             for detalle in detalles:
                 producto_id = detalle.producto_id
                 
+                almacen_inventario = preventa.almacen or almacen_pedidos
+
                 productos_data.append({
                     'producto_id': producto_id,
                     'nombre': detalle.producto.nombre,
@@ -306,9 +311,12 @@ def listar_preventas_con_detalles_carga(request):
                     'cantidad': detalle.cantidad,
                     'cantidad_total': detalle.cantidad,
                     'precio_unitario': detalle.precio_unitario,
+                    'cantidad_cargada': detalle.cantidad_cargada,
+                    'cantidad_entregada': detalle.cantidad_entregada,
+                    'cantidad_logistica': detalle.cantidad_logistica,
                     'cantidad_inventario': LoteInventario.objects.filter(
                         producto_id=producto_id,
-                        almacen=almacen,
+                        almacen=almacen_inventario,
                         status_model=BaseModel.STATUS_MODEL_ACTIVE
                     ).aggregate(total_cantidad=Sum('cantidad'))['total_cantidad'] or 0.0,
                     'is_cargado': detalle.is_cargado,
@@ -700,7 +708,13 @@ def iniciar_reparto(request):
 )
 @api_view(['POST'])
 def finalizar_reparto(request):
-    reparto_id = request.data.get('reparto_id')
+    from django.utils import timezone
+    reparto_id = request.data.get('reparto_id') or request.data.get('embarque_id')
+    if not reparto_id:
+        return Response(
+            {'detail': 'reparto_id es requerido'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
     model_reparto = EmbarqueReparto.objects.filter(id=reparto_id).first()
     if not model_reparto:
         return Response(
@@ -715,10 +729,8 @@ def finalizar_reparto(request):
         )
         
     model_reparto.fase = EmbarqueReparto.FASE_TERMINADO
-    
-    
-    
-    model_reparto.save()
+    model_reparto.fecha_finalizada = timezone.now()
+    model_reparto.save(update_fields=['fase', 'fecha_finalizada', 'updated_at'])
     return Response(
         {
             'success': True,
@@ -938,19 +950,11 @@ def obtener_caja_movimientos_embarque(request):
     serializer = EmbarqueCajaMovimientosSerializer(apertura_caja)
     response_data = serializer.data
     
-    # Obtener las ventas realizadas durante el periodo del embarque
-    # Filtrar por el usuario de la apertura de caja y el rango de fechas
-    usuario_caja = embarque.apertura_caja.usuario
-    fecha_inicio = embarque.created_at
-    fecha_fin = embarque.fecha_finalizada if embarque.fecha_finalizada else timezone.now()
-    
-    ventas_queryset = Venta.objects.select_related(
+    # Obtener las ventas asociadas explícitamente al embarque
+    ventas_queryset = embarque.ventas.select_related(
         'cliente',
         'created_by'
     ).filter(
-        created_by=usuario_caja,
-        created_at__gte=fecha_inicio,
-        created_at__lte=fecha_fin,
         status_model=Venta.STATUS_MODEL_ACTIVE
     ).exclude(
         fase=Venta.FASE_CANCELADA

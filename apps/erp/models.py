@@ -877,6 +877,11 @@ class CompraDetalle(models.Model):
     es_producto_nuevo = models.BooleanField(default=False, verbose_name="Es Nuevo")
     cantidad_entrada = models.DecimalField(max_digits=25, decimal_places=3, verbose_name="Diferencia", default=0.00)
     def save(self, *args, **kwargs):
+        from decimal import Decimal
+        if self.cantidad is not None and not isinstance(self.cantidad, Decimal):
+            self.cantidad = Decimal(str(self.cantidad))
+        if self.precio_unitario is not None and not isinstance(self.precio_unitario, Decimal):
+            self.precio_unitario = Decimal(str(self.precio_unitario))
         self.subtotal = self.cantidad * self.precio_unitario
         super().save(*args, **kwargs)
 
@@ -1068,6 +1073,11 @@ class VentaDetalle(models.Model):
     is_entregado = models.BooleanField(default=False, verbose_name="Entregado", help_text="Indica si este lote ya fue entregado al cliente")
     
     def save(self, *args, **kwargs):
+        from decimal import Decimal
+        if self.cantidad is not None and not isinstance(self.cantidad, Decimal):
+            self.cantidad = Decimal(str(self.cantidad))
+        if self.precio_unitario is not None and not isinstance(self.precio_unitario, Decimal):
+            self.precio_unitario = Decimal(str(self.precio_unitario))
         self.subtotal = self.cantidad * self.precio_unitario
         super().save(*args, **kwargs)
 
@@ -1350,6 +1360,7 @@ class incidencia(BaseModel):
     class Meta:
         verbose_name = "incidencia"
         verbose_name_plural = "incidencias"
+    DEFAULT_DESCRIPCION = "Pendiente de descripción"
     descripcion = models.TextField(verbose_name="Descripción de la incidencia")
     solucion = models.TextField(blank=True, null=True, verbose_name="Solución Aplicada")
     resuelta = models.BooleanField(default=False, verbose_name="incidencia Resuelta")

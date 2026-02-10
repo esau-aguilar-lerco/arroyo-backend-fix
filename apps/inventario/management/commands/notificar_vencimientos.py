@@ -1,14 +1,14 @@
 from django.core.management.base import BaseCommand
 from apps.inventario.services.alertasvencimiento import (
-    notificar_productos_por_vencer
+    notificar_lotes_por_vencer
 )
 
 
 class Command(BaseCommand):
-    help = "Notifica productos próximos a vencer"
+    help = "Notifica lotes próximos a vencer"
 
     def handle(self, *args, **options):
-        total = notificar_productos_por_vencer(dias=30)
+        total = notificar_lotes_por_vencer(dias_alerta=30)
         self.stdout.write(
             self.style.SUCCESS(f"✔ Notificaciones creadas: {total}")
         )

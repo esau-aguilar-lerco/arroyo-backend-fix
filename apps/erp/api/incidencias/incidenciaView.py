@@ -11,7 +11,7 @@ from drf_spectacular.utils import extend_schema, inline_serializer, OpenApiParam
 from drf_spectacular.types import OpenApiTypes
 
 from apps.base.models import BaseModel
-from apps.erp.models import incidencia, IncidenciaLote
+from apps.erp.models import incidencia as IncidenciaModel, IncidenciaLote
 from apps.erp.serializers.incidencias.incidenciaSerializer import (
     IncidenciaMiniSerializer,
     IncidenciaDetailSerializer,
@@ -55,7 +55,7 @@ class IncidenciaListRetrieveAPIView(APIView):
         if pk:
             return self.retrieve(request, pk)
         
-        queryset = incidencia.objects.filter(
+        queryset = IncidenciaModel.objects.filter(
             status_model=BaseModel.STATUS_MODEL_ACTIVE
         ).prefetch_related('lotes_incidencia').order_by('-created_at')
         
@@ -97,7 +97,7 @@ class IncidenciaListRetrieveAPIView(APIView):
         Obtiene el detalle completo de una incidencia
         """
         try:
-            incidencia = incidencia.objects.select_related(
+            incidencia = IncidenciaModel.objects.select_related(
                 'created_by'
             ).prefetch_related(
                 Prefetch(
@@ -112,7 +112,7 @@ class IncidenciaListRetrieveAPIView(APIView):
             serializer = IncidenciaDetailSerializer(incidencia)
             return Response(serializer.data, status=status.HTTP_200_OK)
             
-        except incidencia.DoesNotExist:
+        except IncidenciaModel.DoesNotExist:
             return Response(
                 {'detail': 'incidencia no encontrada.'},
                 status=status.HTTP_404_NOT_FOUND
@@ -182,7 +182,11 @@ def atender_incidencia_lote(request):
                     )
 
                 incidencia = incidencia_lote.incidencia
-                if not incidencia.descripcion or not incidencia.descripcion.strip():
+                if (
+                    not incidencia.descripcion
+                    or not incidencia.descripcion.strip()
+                    or incidencia.descripcion.strip() == IncidenciaModel.DEFAULT_DESCRIPCION
+                ):
                     incidencia.descripcion = tipificacion
                     incidencia.save(update_fields=['descripcion'])
                 elif incidencia.descripcion.strip() != tipificacion:
@@ -209,12 +213,12 @@ def atender_incidencia_lote(request):
             # Verificar si las incidencias están completamente resueltas
             incidencias_resueltas = []
             for incidencia_id in incidencias_a_verificar:
-                incidencia = incidencia.objects.get(pk=incidencia_id)
-                lotes_pendientes = incidencia.lotes_incidencia.filter(atendida=False).exists()
+                incidencia_obj = IncidenciaModel.objects.get(pk=incidencia_id)
+                lotes_pendientes = incidencia_obj.lotes_incidencia.filter(atendida=False).exists()
                 
-                if not lotes_pendientes and not incidencia.resuelta:
-                    incidencia.resuelta = True
-                    incidencia.save()
+                if not lotes_pendientes and not incidencia_obj.resuelta:
+                    incidencia_obj.resuelta = True
+                    incidencia_obj.save()
                     incidencias_resueltas.append(incidencia_id)
             
             return Response({
