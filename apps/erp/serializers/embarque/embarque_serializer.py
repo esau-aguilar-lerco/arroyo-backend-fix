@@ -164,7 +164,7 @@ class ProductoEmbarqueSerializer(serializers.Serializer):
         required=True
     )
     check = serializers.BooleanField(help_text="Indica si el producto está seleccionado para el embarque", required=False)
-    #cantidad = serializers.DecimalField(max_digits=20, decimal_places=5, help_text="Cantidad del producto")
+    cantidad = serializers.DecimalField(max_digits=20, decimal_places=5, help_text="Cantidad del producto")
     #lotes = LoteProductoEmbarqueSerializer(many=True, required=False, help_text="Lista de lotes de productos en el embarque")
 
 class ProductosTaraEmbarqueSerializer(serializers.Serializer):
@@ -379,6 +379,7 @@ class ProductoEmbarqueDetailSerializer(serializers.Serializer):
     unidad_medida = serializers.CharField(source='producto.unidad_sat.nombre', read_only=True, allow_null=True)
     unidad_clave = serializers.CharField(source='producto.unidad_sat.clave', read_only=True, allow_null=True)
     cantidad = serializers.DecimalField(max_digits=20, decimal_places=2, read_only=True)
+    precio_unitario = serializers.DecimalField(max_digits=20, decimal_places=2, read_only=True)
     cantidad_cargada = serializers.DecimalField(max_digits=20, decimal_places=2, read_only=True)
     cantidad_entregada = serializers.DecimalField(max_digits=20, decimal_places=2, read_only=True)
     cantidad_logistica = serializers.DecimalField(max_digits=20, decimal_places=2, read_only=True)

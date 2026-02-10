@@ -184,8 +184,15 @@ def crear_movimiento_inventario_venta(venta_id=None,lotes_ids_en_0 = None, lotes
     """
     Crea registros de movimiento de inventario al registrar una venta.
     """
-    total_movimiento = sum([item['cantidad_tomar'] * item['precio_unitario'] for item in lotes_afectados])
-    cantidad_total = sum([item['cantidad_tomar'] for item in lotes_afectados])
+    def _to_decimal(value):
+        if isinstance(value, Decimal):
+            return value
+        if value is None:
+            return Decimal('0')
+        return Decimal(str(value))
+
+    total_movimiento = sum((_to_decimal(item['cantidad_tomar']) * _to_decimal(item['precio_unitario']) for item in lotes_afectados), Decimal('0'))
+    cantidad_total = sum((_to_decimal(item['cantidad_tomar']) for item in lotes_afectados), Decimal('0'))
     data = {
         'almacen_id': almacen_origen_id,
         'almacen_destino_id': almacen_destino_id,
@@ -212,13 +219,15 @@ def crear_movimiento_inventario_venta(venta_id=None,lotes_ids_en_0 = None, lotes
             help_actualizar_lotes(lotes_afectados,lotes_ids_en_0,almacen_destino_id,user_id)
             #CREAMOS LOS PRODUCTOS MOVIMIENTO, 
             for item in lotes_afectados:
+                cantidad_tomar = _to_decimal(item['cantidad_tomar'])
+                precio_unitario = _to_decimal(item['precio_unitario'])
                 data_mov = {
                     'movimiento_id': movimiento_entrada.id,
                     'producto_id': item['producto_id'],
                     'lote_id': item['lote_id'],
-                    'cantidad': item['cantidad_tomar'],
-                    'costo_unitario': item['precio_unitario'],
-                    'costo_total': item['cantidad_tomar'] * item['precio_unitario'],
+                    'cantidad': cantidad_tomar,
+                    'costo_unitario': precio_unitario,
+                    'costo_total': cantidad_tomar * precio_unitario,
                     'created_by_id': user_id
                 }
                 #Movimiento de salida
@@ -237,13 +246,15 @@ def crear_movimiento_inventario_venta(venta_id=None,lotes_ids_en_0 = None, lotes
             #help_actualizar_lotes(lotes_afectados,lotes_ids_en_0,almacen_destino_id,user_id)
             #CREAMOS LOS PRODUCTOS MOVIMIENTO, 
             for item in lotes_afectados:
+                cantidad_tomar = _to_decimal(item['cantidad_tomar'])
+                precio_unitario = _to_decimal(item['precio_unitario'])
                 data_mov = {
                     'movimiento_id': movimiento.id,
                     'producto_id': item['producto_id'],
                     'lote_id': item['lote_id'],
-                    'cantidad': item['cantidad_tomar'],
-                    'costo_unitario': item['precio_unitario'],
-                    'costo_total': item['cantidad_tomar'] * item['precio_unitario'],
+                    'cantidad': cantidad_tomar,
+                    'costo_unitario': precio_unitario,
+                    'costo_total': cantidad_tomar * precio_unitario,
                     'created_by_id': user_id
                 }
                 #Movimiento de salida

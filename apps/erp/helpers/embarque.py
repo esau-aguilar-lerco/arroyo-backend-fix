@@ -117,14 +117,25 @@ def crear_movimiento_inventario_almacen_embarque(ruta=None, pedidos=None, produc
     # TARA 
     for producto_data in productos_tara:
         producto = producto_data.get('producto')
-        cantidad = Decimal(producto_data.get('cantidad'))
+        cantidad = Decimal(str(producto_data.get('cantidad')))
         lotes = producto_data.get('lotes', [])
+
+        # Precio unitario promedio (ponderado por lote)
+        total_costo = Decimal('0.00')
+        total_cantidad = Decimal('0.00')
+        for lote_data in lotes:
+            lote = lote_data.get('lote')
+            cantidad_lote = Decimal(str(lote_data.get('cantidad')))
+            total_cantidad += cantidad_lote
+            total_costo += cantidad_lote * lote.costo_unitario
+        precio_unitario = (total_costo / total_cantidad) if total_cantidad > 0 else Decimal('0.00')
         
         producto_embarque = ProductoEmbarque.objects.create(
             embarque=models_embarque_reparto,
             tipo=ProductoEmbarque.TARA,
             producto=producto,
             cantidad=cantidad,
+            precio_unitario=precio_unitario,
             created_by=usuario
         )
         for lote_data in lotes:
@@ -231,20 +242,20 @@ def mover_lotes(productos_a_mover = [],alamcen_destino=None,usuario=None):
     for producto_data in productos_a_mover:
         dictionario_lote = {}
         producto = producto_data.get('producto')
-        cantidad = float(producto_data.get('cantidad'))
+        cantidad = Decimal(str(producto_data.get('cantidad')))
         
         dictionario_lote['producto'] = producto
-        dictionario_lote['cantidad'] = cantidad
+        dictionario_lote['cantidad'] = float(cantidad)
         dictionario_lote['lotes'] = []
         
         lotes = producto_data.get('lotes', [])
         for lote_data in lotes:
             lote = lote_data.get('lote')
-            cantidad_lote = float(lote_data.get('cantidad'))
+            cantidad_lote = Decimal(str(lote_data.get('cantidad')))
             
             # Recargar el lote de la DB para obtener la cantidad actualizada
             lote.refresh_from_db()
-            cantidad_actual = float(lote.cantidad)
+            cantidad_actual = Decimal(str(lote.cantidad))
             
             if cantidad_lote >= cantidad_actual:
                 # El lote se mueve completo (o lo que queda)
@@ -271,7 +282,7 @@ def mover_lotes(productos_a_mover = [],alamcen_destino=None,usuario=None):
                 lote_main = nuevo_lote
                 lotes_afectados.append(nuevo_lote)
             
-            dictionario_lote['lotes'].append({'lote': lote_main, 'cantidad': cantidad_lote})
+            dictionario_lote['lotes'].append({'lote': lote_main, 'cantidad': float(cantidad_lote)})
         productos_new.append(dictionario_lote)
     return productos_new
 

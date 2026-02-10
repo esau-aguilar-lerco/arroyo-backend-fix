@@ -7,6 +7,7 @@ from apps.usuarios.models import Usuario
 from apps.erp.models import Producto, Almacen, Rutas
 from django.db import models, transaction
 from django.core.exceptions import ValidationError
+from decimal import Decimal
 
 
 """
@@ -121,6 +122,11 @@ class LoteInventario(BaseModel):
 
     def save(self, *args, **kwargs):
        # Aquí puedes agregar lógica adicional antes de guardar el lote
+        from decimal import Decimal
+        if self.cantidad is not None and not isinstance(self.cantidad, Decimal):
+            self.cantidad = Decimal(str(self.cantidad))
+        if self.costo_unitario is not None and not isinstance(self.costo_unitario, Decimal):
+            self.costo_unitario = Decimal(str(self.costo_unitario))
         if self.cantidad <= 0:
             self.status_model = self.STATUS_MODEL_INACTIVE
             
@@ -285,6 +291,10 @@ class ProductosMovimiento(BaseModel):
     def save(self, *args, **kwargs):
         with transaction.atomic():
 
+            if self.cantidad is not None and not isinstance(self.cantidad, Decimal):
+                self.cantidad = Decimal(str(self.cantidad))
+            if self.costo_unitario is not None and not isinstance(self.costo_unitario, Decimal):
+                self.costo_unitario = Decimal(str(self.costo_unitario))
             if self.cantidad and self.costo_unitario:
                 self.costo_total = self.cantidad * self.costo_unitario
 
@@ -294,6 +304,8 @@ class ProductosMovimiento(BaseModel):
 
             if not self.lote:
                 return
+            if self.lote.cantidad is not None and not isinstance(self.lote.cantidad, Decimal):
+                self.lote.cantidad = Decimal(str(self.lote.cantidad))
 
             # 🔥 AFECTAR INVENTARIO SOLO SI ES NUEVO
             if is_new:

@@ -69,7 +69,7 @@ def movimento_inventario(detalle_lotes=[], almacen_salida=None, almacen_destino=
                     cantidad=cantidad_lote_tomar,  # Usar cantidad del lote
                     lote_id=model_lote.id,
                     costo_unitario=model_lote.costo_unitario,
-                    costo_total=lotes_data['cantidad'] * model_lote.costo_unitario,
+                    costo_total=cantidad_lote_tomar * model_lote.costo_unitario,
                     created_by=user
                 )
                 

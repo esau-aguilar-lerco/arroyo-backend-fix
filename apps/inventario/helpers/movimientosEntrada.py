@@ -1,5 +1,7 @@
+from decimal import Decimal
+
 from apps.inventario.models import MovimientoInventario, ProductosMovimiento, LoteInventario
-from apps.erp.models import incidencia, IncidenciaLote,Almacen
+from apps.erp.models import incidencia as IncidenciaModel, IncidenciaLote, Almacen
 from django.db import transaction
 
 
@@ -35,7 +37,7 @@ def create_movimiento_entrada(model_movimiento,productos_con_lote, user=None,ref
                 fase=MovimientoInventario.FASE_TERMINADA,
             )
 
-        count_cantidad = 0
+        count_cantidad = Decimal("0.00")
         
         lotes_incidencias = []
         for detalle in productos_con_lote:
@@ -45,6 +47,8 @@ def create_movimiento_entrada(model_movimiento,productos_con_lote, user=None,ref
             for lote_data in lotes:
                 lote_origen = lote_data['lote']
                 cantidad = lote_data['cantidad']
+                if not isinstance(cantidad, Decimal):
+                    cantidad = Decimal(str(cantidad))
 
                 # En traspasos usar el lote del almacén virtual para no tocar CEDIS
                 lote = lote_origen
@@ -107,6 +111,10 @@ def create_movimiento_entrada(model_movimiento,productos_con_lote, user=None,ref
 
                 if not created:
                     item_vir.cantidad += cantidad
+                    if not isinstance(item_vir.cantidad, Decimal):
+                        item_vir.cantidad = Decimal(str(item_vir.cantidad))
+                    if not isinstance(item_vir.costo_unitario, Decimal):
+                        item_vir.costo_unitario = Decimal(str(item_vir.costo_unitario))
                     item_vir.costo_total = item_vir.cantidad * item_vir.costo_unitario
                     item_vir.save()
 
@@ -155,8 +163,8 @@ def _crear_incidencia(productos_incidencias, almacen, movimiento, user):
         if not productos_incidencias:
             return None
 
-        incidencia = incidencia.objects.create(
-            descripcion="",
+        incidencia_obj = IncidenciaModel.objects.create(
+            descripcion=IncidenciaModel.DEFAULT_DESCRIPCION,
             resuelta=False,
             created_by=user,
             #updated_by=user
@@ -173,7 +181,7 @@ def _crear_incidencia(productos_incidencias, almacen, movimiento, user):
             )
             
             IncidenciaLote.objects.create(
-                incidencia=incidencia,
+                incidencia=incidencia_obj,
                 lote=lote,  # No hay lote asociado en este caso
                 #producto=item['producto'],
                 cantidad=item['cantidad'],
@@ -182,4 +190,4 @@ def _crear_incidencia(productos_incidencias, almacen, movimiento, user):
                 updated_by=user
             )
 
-        return incidencia
+        return incidencia_obj
