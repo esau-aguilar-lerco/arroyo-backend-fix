@@ -840,7 +840,11 @@ class Compra(BaseModel):
     def __str__(self):
         return f"Compra {self.codigo} - {self.proveedor.nombre}"
     
-    def save(self, *args, **kwargs):    
+    def save(self, *args, **kwargs):        
+        if isinstance(self.codigo, str):
+            self.codigo = self.codigo.strip()
+
+        # Fecha vencimiento
         if not self.fecha_vencimiento:
             producto = getattr(self, "producto", None)
             dias = getattr(producto, "dias_caducidad", None)
@@ -855,12 +859,19 @@ class Compra(BaseModel):
                 except OverflowError:
                     self.fecha_vencimiento = None
             else:
-                
                 self.fecha_vencimiento = None
 
+        # Si no hay folio, guarda primero para obtener pk
+        creating_without_code = not self.codigo
         super().save(*args, **kwargs)
 
-
+        # Genera folio solo después de tener pk
+        if creating_without_code and self.pk:
+            new_code = self.generar_codigo()
+            if new_code and self.codigo != new_code:
+                # update() evita reentrar al save
+                type(self).objects.filter(pk=self.pk).update(codigo=new_code)
+                self.codigo = new_code
 
 
 class CompraDetalle(models.Model):

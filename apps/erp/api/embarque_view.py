@@ -10,7 +10,7 @@ from drf_spectacular.utils import extend_schema, inline_serializer, OpenApiParam
 from drf_spectacular.types import OpenApiTypes
 
 from apps.base.models import BaseModel
-from apps.erp.models import Venta, Rutas
+from apps.erp.models import Venta, Rutas, Almacen
 from apps.erp.serializers.embarque.embarque_serializer import (
     EmbarqueSerializer, EmbarqueMiniSerializer, VentasEmbarqueSubidaRutaSerializer
 )
@@ -21,6 +21,45 @@ from apps.erp.serializers.embarque.embarque_serializer import (
                             VIEWS DE APIS DE EMBARQUE
 ============================================================================================
 """
+def _resolve_ruta_from_payload(payload):
+    ruta_data = payload.get('ruta')
+    ruta_id = None
+    if isinstance(ruta_data, dict):
+        ruta_id = ruta_data.get('id')
+    elif isinstance(ruta_data, int):
+        ruta_id = ruta_data
+    elif isinstance(ruta_data, str) and ruta_data.isdigit():
+        ruta_id = int(ruta_data)
+
+    if not ruta_id:
+        return None
+
+    return (
+        Rutas.objects
+        .select_related('asignado__almacen', 'almacen_embarque')
+        .filter(id=ruta_id, status_model=BaseModel.STATUS_MODEL_ACTIVE)
+        .first()
+    )
+
+
+def _get_almacen_origen_carga(ruta=None, user=None, explicit_almacen=None):
+    if explicit_almacen:
+        return explicit_almacen
+
+    concentrado = Almacen.objects.filter(
+        nombre__iexact='CONCENTRADO DE RUTAS',
+        status_model=BaseModel.STATUS_MODEL_ACTIVE
+    ).first()
+    if concentrado:
+        return concentrado
+
+    if ruta and ruta.asignado and ruta.asignado.almacen:
+        return ruta.asignado.almacen
+    if user and user.almacen:
+        return user.almacen
+    if ruta and ruta.almacen_embarque:
+        return ruta.almacen_embarque
+    return None
 
 class EmbarqueListCreateAPIView(APIView):
     """
@@ -50,50 +89,57 @@ class EmbarqueListCreateAPIView(APIView):
         },
         tags=['Embarque']
     )
+    
     def post(self, request):
         """
         Crear un nuevo embarque procesando preventas y productos en tara
         """
         from apps.inventario.models import Almacen
-        
-        almacen_origen = request.data.get('almacen_origen', None)
-        if almacen_origen:
+
+        ruta = _resolve_ruta_from_payload(request.data)
+
+        explicit_almacen = request.data.get('almacen_origen', None)
+        if explicit_almacen:
             # Si viene un ID, convertirlo a instancia
-            if isinstance(almacen_origen, int) or (isinstance(almacen_origen, str) and almacen_origen.isdigit()):
-                almacen_origen = Almacen.objects.filter(id=int(almacen_origen)).first()
-                if not almacen_origen:
+            if isinstance(explicit_almacen, int) or (isinstance(explicit_almacen, str) and explicit_almacen.isdigit()):
+                explicit_almacen = Almacen.objects.filter(id=int(explicit_almacen)).first()
+                if not explicit_almacen:
                     return Response(
                         {'detail': 'El almacén de origen no existe.'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
-        else:
-            almacen_origen = request.user.almacen
-            
+
+        almacen_origen = _get_almacen_origen_carga(
+            ruta=ruta,
+            user=request.user,
+            explicit_almacen=explicit_almacen
+        )
+
         if not almacen_origen:
             return Response(
                 {'detail': 'El almacén de origen es obligatorio para crear un embarque.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        serializer = EmbarqueSerializer(data=request.data, context={'request': request, 'almacen_origen': almacen_origen})
-        
+
+        serializer = EmbarqueSerializer(
+            data=request.data,
+            context={'request': request, 'almacen_origen': almacen_origen}
+        )
+
         if not serializer.is_valid():
             return Response(
                 {'detail': 'Datos inválidos', 'errors': serializer.errors},
                 status=status.HTTP_400_BAD_REQUEST
             )
-       
+
         try:
             with transaction.atomic():
-                # Procesar el embarque
                 embarque_data = serializer.save()
-                
                 return Response({
-                            'success': True,
-                            #'message': f'Embarque creado exitosamente para ruta {ruta.nombre}',
-                            'embarque_id':  embarque_data.id,
-                            'fase': embarque_data.fase,
-
-                        }, status=status.HTTP_201_CREATED)    
+                    'success': True,
+                    'embarque_id': embarque_data.id,
+                    'fase': embarque_data.fase,
+                }, status=status.HTTP_201_CREATED)
         except ValidationError as e:
             return Response(
                 {'detail': f'Error de validación: {str(e)}'},
@@ -234,6 +280,7 @@ def listar_preventas_con_detalles_carga(request):
             filtros['ruta_id'] = ruta.id
 
         almacen_pedidos = ruta.almacen_embarque
+        almacen_origen_carga = _get_almacen_origen_carga(ruta=ruta, user=user)
         print(f"almacen de pedidos (ruta): {ruta.almacen_embarque} | almacen usuario: {user.almacen}")
         
         if not almacen_pedidos:
@@ -300,7 +347,11 @@ def listar_preventas_con_detalles_carga(request):
             for detalle in detalles:
                 producto_id = detalle.producto_id
                 
-                almacen_inventario = preventa.almacen or almacen_pedidos
+                almacen_inventario = ((
+                    ruta.asignado.almacen if ruta and ruta.asignado 
+                    and ruta.asignado.almacen 
+                    else None)
+                    or preventa.almacen or almacen_pedidos)
 
                 productos_data.append({
                     'producto_id': producto_id,
