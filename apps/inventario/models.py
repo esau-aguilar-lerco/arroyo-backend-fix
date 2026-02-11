@@ -290,34 +290,38 @@ class ProductosMovimiento(BaseModel):
 
     def save(self, *args, **kwargs):
         with transaction.atomic():
-
             if self.cantidad is not None and not isinstance(self.cantidad, Decimal):
                 self.cantidad = Decimal(str(self.cantidad))
             if self.costo_unitario is not None and not isinstance(self.costo_unitario, Decimal):
                 self.costo_unitario = Decimal(str(self.costo_unitario))
-            if self.cantidad and self.costo_unitario:
-                self.costo_total = self.cantidad * self.costo_unitario
 
-            is_new = self._state.adding  # 👈 CLAVE
+            self.cantidad = self.cantidad or Decimal("0")
+            self.costo_unitario = self.costo_unitario or Decimal("0")
+            self.costo_total = self.cantidad * self.costo_unitario
 
+            is_new = self._state.adding
             super().save(*args, **kwargs)
 
-            if not self.lote:
+            if not self.lote_id or not is_new:
                 return
-            if self.lote.cantidad is not None and not isinstance(self.lote.cantidad, Decimal):
-                self.lote.cantidad = Decimal(str(self.lote.cantidad))
 
-            # 🔥 AFECTAR INVENTARIO SOLO SI ES NUEVO
-            if is_new:
-                if self.movimiento.tipo == MovimientoInventario.TIPO_SALIDA:
-                    if self.lote.cantidad < self.cantidad:
-                        raise ValidationError("No hay suficiente inventario en el lote")
-                    self.lote.cantidad -= self.cantidad
+            lote_db = LoteInventario.objects.select_for_update().get(id=self.lote_id)
 
-                elif self.movimiento.tipo == MovimientoInventario.TIPO_ENTRADA:
-                    self.lote.cantidad += self.cantidad
+            if lote_db.cantidad is not None and not isinstance(lote_db.cantidad, Decimal):
+                lote_db.cantidad = Decimal(str(lote_db.cantidad))
 
-                self.lote.save()
+            if self.movimiento.tipo == MovimientoInventario.TIPO_SALIDA:
+                if lote_db.cantidad < self.cantidad:
+                    raise ValidationError(
+                        f"No hay suficiente inventario en el lote {lote_db.id}. "
+                        f"Disponible: {lote_db.cantidad}, requerido: {self.cantidad}"
+                    )
+                lote_db.cantidad -= self.cantidad
+
+            elif self.movimiento.tipo == MovimientoInventario.TIPO_ENTRADA:
+                lote_db.cantidad += self.cantidad
+
+            lote_db.save(update_fields=["cantidad", "updated_at"])
 
 
     def __str__(self):
