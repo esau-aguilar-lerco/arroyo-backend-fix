@@ -33,6 +33,7 @@ METODOS_PAGO = [
     {'nombre': 'TARJETA DE DÉBITO', 'tipo': 'TD', 'is_credito': False},
     {'nombre': 'CHEQUE', 'tipo': 'CHEQUE', 'is_credito': False},
     {'nombre': 'DEPÓSITO', 'tipo': 'DEPÓSITO', 'is_credito': False},
+    {'nombre': 'TRANSFERENCIA', 'tipo': 'TRANSFERENCIA', 'is_credito': False},
     {'nombre': 'CREDITO', 'tipo': 'CRE', 'is_credito': True},
 ]
 

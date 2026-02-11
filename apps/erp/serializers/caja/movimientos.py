@@ -39,7 +39,23 @@ class MetodoPagoCajaAperturaSerializer(serializers.Serializer):
         if value <= 0:
             raise serializers.ValidationError("El monto debe ser mayor a cero.")
         return value
-    
+
+    def validate(self, attrs):
+        """
+        Referencia obligatoria para métodos distintos a EFECTIVO/CREDITO.
+        """
+        metodo_pago = attrs.get("metodo_pago")
+        referencia = (attrs.get("referencia") or "").strip()
+        metodo_nombre = (metodo_pago.nombre if metodo_pago else "").upper()
+
+        if metodo_nombre not in {"EFECTIVO", "CREDITO", "CRÉDITO"} and not referencia:
+            raise serializers.ValidationError(
+                {"referencia": "La referencia es obligatoria para este método de pago."}
+            )
+
+        attrs["referencia"] = referencia or None
+        return attrs
+
 
 
 class MovimientoCajaVentaSerializer(serializers.Serializer):

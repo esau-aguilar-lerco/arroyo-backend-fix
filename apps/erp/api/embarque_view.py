@@ -347,11 +347,11 @@ def listar_preventas_con_detalles_carga(request):
             for detalle in detalles:
                 producto_id = detalle.producto_id
                 
-                almacen_inventario = ((
-                    ruta.asignado.almacen if ruta and ruta.asignado 
-                    and ruta.asignado.almacen 
-                    else None)
-                    or preventa.almacen or almacen_pedidos)
+                almacen_inventario = (
+                    almacen_origen_carga
+                    or preventa.almacen
+                    or almacen_pedidos
+                )
 
                 productos_data.append({
                     'producto_id': producto_id,

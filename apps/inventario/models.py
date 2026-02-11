@@ -123,6 +123,9 @@ class LoteInventario(BaseModel):
     def save(self, *args, **kwargs):
        # Aquí puedes agregar lógica adicional antes de guardar el lote
         from decimal import Decimal
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None:
+            update_fields = set(update_fields)
         if self.cantidad is not None and not isinstance(self.cantidad, Decimal):
             self.cantidad = Decimal(str(self.cantidad))
         if self.costo_unitario is not None and not isinstance(self.costo_unitario, Decimal):
@@ -132,6 +135,11 @@ class LoteInventario(BaseModel):
             
         if self.cantidad > 0 and self.status_model != self.STATUS_MODEL_ACTIVE:
             self.status_model = self.STATUS_MODEL_ACTIVE
+        if update_fields is not None and "cantidad" in update_fields:
+            # Si se actualiza cantidad, también debe persistir el estado del lote.
+            update_fields.add("status_model")
+            update_fields.add("updated_at")
+            kwargs["update_fields"] = list(update_fields)
         # Por ejemplo, podrías validar o modificar campos antes de guardar
         if not self.fecha_vencimiento:
             dias = getattr(self.producto, "dias_caducidad", None)
