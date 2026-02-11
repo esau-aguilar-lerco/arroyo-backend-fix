@@ -484,8 +484,32 @@ class EmbarqueRepartoListRetrieveAPIView(APIView):
                 
                 
         if fase:
-            queryset = queryset.filter(fase=fase)
-        
+            from django.db.models import Max
+            fase_normalizada = (fase or '').strip().upper()
+
+            # Compatibilidad para Lista de Embarque del front actual:
+            # cuando envía fase=CARGA en modo sin paginación, también se
+            # incluyen rutas ya en REPARTO y se devuelve el embarque más reciente por ruta.
+            if (
+                sin_paginacion
+                and not ruta_id
+                and fase_normalizada == EmbarqueReparto.FASE_CARGA
+            ):
+                queryset = queryset.filter(
+                    fase__in=[EmbarqueReparto.FASE_CARGA, EmbarqueReparto.FASE_REPARTO]
+                )
+                latest_ids = (
+                    queryset.values('ruta_id')
+                    .annotate(last_id=Max('id'))
+                    .values_list('last_id', flat=True)
+                )
+                queryset = queryset.filter(id__in=latest_ids)
+            elif ',' in fase_normalizada:
+                fases = [f.strip().upper() for f in fase_normalizada.split(',') if f.strip()]
+                queryset = queryset.filter(fase__in=fases)
+            else:
+                queryset = queryset.filter(fase=fase_normalizada)
+
         if encargado_id:
             queryset = queryset.filter(encargado_id=encargado_id)
         
@@ -546,7 +570,7 @@ class EmbarqueRepartoListRetrieveAPIView(APIView):
                     queryset=ProductoEmbarque.objects.select_related(
                         'producto__unidad_sat',
                         'preventa'
-                    ).prefetch_related('lotes__lote')
+                    ).prefetch_related('lotes__lote', 'preventa__detalles__producto__unidad_sat')
                 )
             )
             
@@ -972,3 +996,128 @@ def obtener_caja_movimientos_embarque(request):
     response_data['cantidad_ventas'] = ventas_queryset.count()
     
     return Response(response_data, status=status.HTTP_200_OK)
+
+
+@extend_schema(
+    summary="Listado de pedidos del usuario en fase REPARTO",
+    description="Devuelve el embarque activo en REPARTO del usuario y sus pedidos/preventas con detalle de productos.",
+    parameters=[
+        OpenApiParameter(
+            name='embarque_id',
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.QUERY,
+            description='ID de embarque opcional. Si no se envía, se busca el REPARTO activo del usuario.',
+            required=False
+        )
+    ],
+    responses={
+        200: OpenApiTypes.OBJECT,
+        404: OpenApiTypes.OBJECT
+    },
+    tags=['Embarque']
+)
+@api_view(['GET'])
+def listado_pedidos_usuario_reparto(request):
+    from django.db.models import Q, Prefetch
+    from decimal import Decimal
+
+    def cantidad_prioritaria(detalle):
+        candidatos = [
+            detalle.cantidad_logistica,
+            detalle.cantidad_cargada,
+            detalle.cantidad,
+        ]
+        for value in candidatos:
+            if value is not None and Decimal(str(value)) > 0:
+                return value
+        return Decimal('0.000')
+
+    try:
+        embarque_id = request.query_params.get('embarque_id')
+
+        queryset = EmbarqueReparto.objects.select_related(
+            'ruta',
+            'encargado'
+        ).prefetch_related(
+            Prefetch(
+                'ventas',
+                queryset=Venta.objects.select_related('cliente').prefetch_related('detalles__producto__unidad_sat').exclude(
+                    fase=Venta.FASE_CANCELADA
+                )
+            )
+        ).filter(
+            status_model=BaseModel.STATUS_MODEL_ACTIVE
+        )
+
+        if embarque_id:
+            queryset = queryset.filter(id=embarque_id)
+        else:
+            queryset = queryset.filter(
+                fase=EmbarqueReparto.FASE_REPARTO
+            ).filter(
+                Q(encargado=request.user) | Q(ruta__asignado=request.user)
+            )
+
+        embarque = queryset.order_by('-id').first()
+        if not embarque:
+            return Response(
+                {'detail': 'No hay embarque en fase REPARTO para el usuario actual.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        ventas_data = []
+        for venta in embarque.ventas.all().order_by('-created_at'):
+            detalles_data = []
+            for detalle in venta.detalles.all():
+                detalles_data.append({
+                    'id': detalle.id,
+                    'producto_id': detalle.producto_id,
+                    'producto_codigo': detalle.producto.codigo if detalle.producto else None,
+                    'producto_nombre': detalle.producto.nombre if detalle.producto else None,
+                    'unidad_medida': detalle.producto.unidad_sat.nombre if detalle.producto and detalle.producto.unidad_sat else None,
+                    'unidad_clave': detalle.producto.unidad_sat.clave if detalle.producto and detalle.producto.unidad_sat else None,
+                    'cantidad': cantidad_prioritaria(detalle),
+                    'cantidad_logistica': detalle.cantidad_logistica,
+                    'cantidad_cargada': detalle.cantidad_cargada,
+                    'cantidad_entregada': detalle.cantidad_entregada,
+                    'precio_unitario': detalle.precio_unitario,
+                    'subtotal': detalle.subtotal,
+                    'is_cargado': detalle.is_cargado,
+                    'is_entregado': detalle.is_entregado,
+                })
+
+            ventas_data.append({
+                'id': venta.id,
+                'codigo': venta.codigo,
+                'cliente_id': venta.cliente_id,
+                'cliente_nombre': venta.cliente.get_full_name if venta.cliente else None,
+                'fase': venta.fase,
+                'condicion_pago': venta.condicion_pago,
+                'total': venta.total,
+                'total_pagado': venta.total_pagado,
+                'is_entregado': venta.is_entregado,
+                'is_total_cargado': venta.is_total_cargado,
+                'detalles': detalles_data,
+            })
+
+        return Response({
+            'embarque': {
+                'id': embarque.id,
+                'fase': embarque.fase,
+                'ruta_id': embarque.ruta_id,
+                'ruta_codigo': embarque.ruta.codigo if embarque.ruta else None,
+                'ruta_nombre': embarque.ruta.nombre if embarque.ruta else None,
+                'encargado_id': embarque.encargado_id,
+                'encargado_nombre': embarque.encargado.full_name() if embarque.encargado else None,
+                'fecha_salida': embarque.fecha_salida,
+                'fecha_finalizada': embarque.fecha_finalizada,
+            },
+            'ventas': ventas_data,
+            'total_ventas': len(ventas_data),
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response(
+            {'detail': f'Error al obtener pedidos del reparto: {str(e)}'},
+            status=status.HTTP_400_BAD_REQUEST
+        )

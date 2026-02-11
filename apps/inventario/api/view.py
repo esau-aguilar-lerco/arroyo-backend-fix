@@ -1,5 +1,6 @@
 from django.db import models,transaction
 from django.utils import timezone
+from decimal import Decimal, InvalidOperation
 
 from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView
@@ -35,6 +36,17 @@ from apps.inventario.serializers.movimientoPrincipal import (MovimimientosMiniSe
 
 #PERMISOS CLASES 
 from apps.inventario.auth.permisos import DetalleCedisPermission
+
+
+def _to_decimal_or_zero(value):
+    if value is None:
+        return Decimal("0")
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal("0")
 
 
 """
@@ -752,6 +764,8 @@ class InventarioAlmacenAPIView(APIView):
                 'producto__unidad_sat__nombre',
                 'producto__unidad_sat__clave',
                 "producto__codigo",
+                "producto__precio_publico",
+                "producto__precio_base",
             )
             .annotate(
                 cantidad_total=models.Sum('cantidad'),
@@ -788,12 +802,24 @@ class InventarioAlmacenAPIView(APIView):
         # ✅ CONSTRUIR RESPUESTA CON TODOS LOS PRODUCTOS
         productos_data = []
         for item in productos_list:
+            cantidad_total = _to_decimal_or_zero(item.get('cantidad_total'))
+            valor_total = _to_decimal_or_zero(item.get('valor_total'))
+            precio_publico = _to_decimal_or_zero(item.get('producto__precio_publico'))
+            precio_base = _to_decimal_or_zero(item.get('producto__precio_base'))
+
+            precio_unitario = (valor_total / cantidad_total) if cantidad_total > 0 else Decimal('0')
+            if precio_unitario <= 0:
+                precio_unitario = precio_publico if precio_publico > 0 else precio_base
+
             productos_data.append({
                 'producto_id': item['producto_id'],
                 'codigo': item['producto__codigo'],
                 'producto_nombre': item['producto__nombre'],
                 'cantidad_total': item['cantidad_total'],
                 'valor_total': item['valor_total'],
+                'precio_publico': precio_publico,
+                'precio_base': precio_base,
+                'precio_unitario': precio_unitario,
                 'numero_lotes': item['numero_lotes'],
                 'unidad_medida': item['producto__unidad_sat__nombre'],
                 'unidad_clave': item['producto__unidad_sat__clave'],
@@ -925,6 +951,8 @@ class InventarioAlmacenConsultaAPIView(APIView):
                 'producto__unidad_sat__nombre',
                 'producto__unidad_sat__clave',
                 "producto__codigo",
+                "producto__precio_publico",
+                "producto__precio_base",
             )
             .annotate(
                 cantidad_total=models.Sum('cantidad'),
@@ -1005,11 +1033,11 @@ class InventarioAlmacenConsultaAPIView(APIView):
                 .prefetch_related('ubicacion')
                 .order_by('fecha_vencimiento')
             )
-            
+
             for lote in lotes_detallados:
                 if lote.producto_id not in lotes_por_producto:
                     lotes_por_producto[lote.producto_id] = []
-                
+
                 lotes_por_producto[lote.producto_id].append({
                     'id': lote.id,
                     'cantidad': lote.cantidad,
@@ -1022,12 +1050,24 @@ class InventarioAlmacenConsultaAPIView(APIView):
         # ✅ CONSTRUIR RESPUESTA CON PRODUCTOS PAGINADOS
         productos_data = []
         for item in productos_paginados:
+            cantidad_total = _to_decimal_or_zero(item.get('cantidad_total'))
+            valor_total = _to_decimal_or_zero(item.get('valor_total'))
+            precio_publico = _to_decimal_or_zero(item.get('producto__precio_publico'))
+            precio_base = _to_decimal_or_zero(item.get('producto__precio_base'))
+
+            precio_unitario = (valor_total / cantidad_total) if cantidad_total > 0 else Decimal('0')
+            if precio_unitario <= 0:
+                precio_unitario = precio_publico if precio_publico > 0 else precio_base
+
             productos_data.append({
                 'producto_id': item['producto_id'],
                 'codigo': item['producto__codigo'],
                 'producto_nombre': item['producto__nombre'],
                 'cantidad_total': item['cantidad_total'],
                 'valor_total': item['valor_total'],
+                'precio_publico': precio_publico,
+                'precio_base': precio_base,
+                'precio_unitario': precio_unitario,
                 'numero_lotes': item['numero_lotes'],
                 'unidad_medida': item['producto__unidad_sat__nombre'],
                 'unidad_clave': item['producto__unidad_sat__clave'],

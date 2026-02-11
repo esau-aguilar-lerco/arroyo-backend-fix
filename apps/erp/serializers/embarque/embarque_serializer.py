@@ -1,7 +1,10 @@
 from rest_framework import serializers
 from apps.erp.models import Venta, Almacen, Rutas, Producto, CajaApertura, CajaTransaccion
+from apps.erp.models import VentaDetalle
 from apps.inventario.models import LoteInventario, EmbarqueReparto, ProductoEmbarque
 from apps.base.serializer import FlexiblePKRelatedField, SerializerRelatedField
+from django.db.models import Sum
+from decimal import Decimal, InvalidOperation
 
 from apps.erp.helpers.embarque import crear_movimiento_inventario_almacen_embarque
 
@@ -378,14 +381,107 @@ class ProductoEmbarqueDetailSerializer(serializers.Serializer):
     producto_codigo = serializers.CharField(source='producto.codigo', read_only=True)
     unidad_medida = serializers.CharField(source='producto.unidad_sat.nombre', read_only=True, allow_null=True)
     unidad_clave = serializers.CharField(source='producto.unidad_sat.clave', read_only=True, allow_null=True)
-    cantidad = serializers.DecimalField(max_digits=20, decimal_places=2, read_only=True)
-    precio_unitario = serializers.DecimalField(max_digits=20, decimal_places=2, read_only=True)
-    cantidad_cargada = serializers.DecimalField(max_digits=20, decimal_places=2, read_only=True)
-    cantidad_entregada = serializers.DecimalField(max_digits=20, decimal_places=2, read_only=True)
-    cantidad_logistica = serializers.DecimalField(max_digits=20, decimal_places=2, read_only=True)
+    cantidad = serializers.SerializerMethodField()
+    precio_unitario = serializers.SerializerMethodField()
+    cantidad_cargada = serializers.SerializerMethodField()
+    cantidad_entregada = serializers.SerializerMethodField()
+    cantidad_logistica = serializers.SerializerMethodField()
     preventa_id = serializers.IntegerField(source='preventa.id', read_only=True, allow_null=True)
     preventa_codigo = serializers.CharField(source='preventa.codigo', read_only=True, allow_null=True)
     lotes = LoteProductoEmbarqueDetailSerializer(many=True, read_only=True)
+
+    def _to_decimal(self, value, decimal_places=3):
+        if value is None:
+            return Decimal('0.000' if decimal_places == 3 else '0.00')
+        try:
+            number = Decimal(str(value))
+        except (InvalidOperation, ValueError, TypeError):
+            return Decimal('0.000' if decimal_places == 3 else '0.00')
+        quant = Decimal('0.001' if decimal_places == 3 else '0.01')
+        return number.quantize(quant)
+
+    def _first_positive_decimal(self, values, decimal_places=3):
+        for value in values:
+            number = self._to_decimal(value, decimal_places=decimal_places)
+            if number > 0:
+                return number
+        return self._to_decimal(0, decimal_places=decimal_places)
+
+    def _get_venta_detalle(self, obj):
+        if obj.tipo != ProductoEmbarque.PEDIDO or not obj.preventa_id:
+            return None
+
+        cache = self.context.setdefault('_venta_detalle_cache', {})
+        key = (obj.preventa_id, obj.producto_id)
+        if key in cache:
+            return cache[key]
+
+        detalle = None
+        preventa = getattr(obj, 'preventa', None)
+        if preventa is not None and hasattr(preventa, 'detalles'):
+            detalle = next(
+                (d for d in preventa.detalles.all() if d.producto_id == obj.producto_id),
+                None
+            )
+
+        if detalle is None:
+            detalle = (
+                VentaDetalle.objects
+                .filter(venta_id=obj.preventa_id, producto_id=obj.producto_id)
+                .only(
+                    'cantidad',
+                    'cantidad_logistica',
+                    'cantidad_cargada',
+                    'cantidad_entregada',
+                    'precio_unitario'
+                )
+                .first()
+            )
+
+        cache[key] = detalle
+        return detalle
+
+    def get_cantidad(self, obj):
+        if obj.tipo == ProductoEmbarque.PEDIDO:
+            detalle = self._get_venta_detalle(obj)
+            if detalle is not None:
+                return self._first_positive_decimal([
+                    detalle.cantidad_logistica,
+                    detalle.cantidad_cargada,
+                    detalle.cantidad,
+                    obj.cantidad,
+                ], decimal_places=3)
+
+        lotes_total = obj.lotes.aggregate(total=Sum('cantidad')).get('total')
+        return self._first_positive_decimal([obj.cantidad, lotes_total], decimal_places=3)
+
+    def get_precio_unitario(self, obj):
+        detalle = self._get_venta_detalle(obj)
+        producto = getattr(obj, 'producto', None)
+        return self._first_positive_decimal([
+            obj.precio_unitario,
+            getattr(detalle, 'precio_unitario', None),
+            getattr(producto, 'precio_publico', None),
+            getattr(producto, 'precio_base', None),
+        ], decimal_places=2)
+
+    def get_cantidad_cargada(self, obj):
+        detalle = self._get_venta_detalle(obj)
+        if detalle is None:
+            return self._to_decimal(0, decimal_places=3)
+        return self._to_decimal(detalle.cantidad_cargada, decimal_places=3)
+
+    def get_cantidad_entregada(self, obj):
+        detalle = self._get_venta_detalle(obj)
+        if detalle is None:
+            return self._to_decimal(0, decimal_places=3)
+        return self._to_decimal(detalle.cantidad_entregada, decimal_places=3)
+
+    def get_cantidad_logistica(self, obj):
+        detalle = self._get_venta_detalle(obj)
+        if detalle is None:
+            return self._to_decimal(0, decimal_places=3)
+        return self._to_decimal(detalle.cantidad_logistica, decimal_places=3)
 
 
 class EmbarqueDetailSerializer(serializers.ModelSerializer):

@@ -481,9 +481,3 @@ class Transformacion(BaseModel):
     nota = models.TextField(null=True, blank=True)
     movimiento_salida = models.ForeignKey(MovimientoInventario, on_delete=models.SET_NULL, null=True, blank=True, related_name='transformaciones_salida',help_text="Movimiento de salida asociado a la transformación o merma productos a transformar")
     movimiento_entrada = models.ForeignKey(MovimientoInventario, on_delete=models.SET_NULL, null=True, blank=True, related_name='transformaciones_entrada' ,help_text="Movimiento de entrada asociado a la transformación productos resultantes")
-
-    
-    
-
-    
-    
