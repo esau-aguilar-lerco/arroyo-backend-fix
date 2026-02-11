@@ -16,7 +16,10 @@ class AbastecimientoService:
         """
         Crea un lote de inventario para la incidencia
         """
-        almacen = Almacen.objects.filter(tipo = Almacen.TIPO_INCIDENCIAS).first()
+        almacen = Almacen.objects.filter(tipo=Almacen.TIPO_INCIDENCIAS).first()
+        if not almacen:
+            raise ValueError("No existe un almacén de incidencias configurado")
+
         lote = LoteInventario.objects.create(
             producto=producto,
             almacen=almacen,
@@ -302,52 +305,114 @@ class AbastecimientoService:
                 }
             }
         }
-    @staticmethod
-    def procesar_entrada(cls,items, compra_id):
-        existe_diferencia = False
-        productos_incidencias = []
-        for producto_item in items:
-            detalle = CompraDetalle.objects.filter(
-                compra_id=compra_id,
-                producto=producto_item['producto']
-            ).first()
-            
-            if not detalle:
-                #PRODUCTO ADICIONAL
-                existe_diferencia = True
-                compra_detalle = CompraDetalle(
-                    compra_id=compra_id,
-                    producto=producto_item['producto'],
-                    cantidad=producto_item['cantidad'],
-                    precio_unitario=producto_item['costo_unitario'],
-                    existe_diferencia=False,
-                    es_producto_nuevo=True,
-                    cantidad_entrada=producto_item['cantidad']
-                )
-                compra_detalle.save()
-            else:
-                if detalle.cantidad != producto_item['cantidad'] :
-                    diferencia = detalle.cantidad - producto_item['cantidad']
-                    productos_incidencias.append({
-                        "producto": producto_item['producto'],
-                        "cantidad": diferencia
-                    })
-                    #existe_diferencia = True
-                    detalle.existe_diferencia = True
-                detalle.cantidad_entrada = producto_item['cantidad']
-                
-                detalle.save(update_fields=['existe_diferencia', 'cantidad_entrada'])
+    @classmethod
+    def procesar_entrada(cls, items, compra_id, user):
+        """
+        Registra diferencias entre lo solicitado en compra y lo efectivamente recibido.
 
-        compra = Compra.objects.get(id=compra_id)
+        Regla principal:
+        - Si se recibe menos cantidad que la solicitada, el faltante se manda a incidencias.
+        - Si un producto de la compra no se recibe, se manda todo su faltante a incidencias.
+        - Lo recibido sí entra a inventario por el flujo normal de lotes/movimientos.
+        """
+        decimal_zero = Decimal('0.000')
+
+        compra = Compra.objects.select_for_update().get(id=compra_id)
+        detalles_qs = CompraDetalle.objects.select_for_update().filter(compra_id=compra_id)
+        detalles_por_producto = {d.producto_id: d for d in detalles_qs}
+
+        productos_recibidos = set()
+        productos_incidencias = []
+        existe_diferencia = False
+
+        for producto_item in items:
+            producto_value = producto_item.get('producto')
+            if isinstance(producto_value, Producto):
+                producto = producto_value
+            else:
+                producto = Producto.objects.filter(id=producto_value).first()
+                if not producto:
+                    continue
+
+            productos_recibidos.add(producto.id)
+
+            cantidad_recibida = producto_item.get('cantidad', decimal_zero)
+            if not isinstance(cantidad_recibida, Decimal):
+                cantidad_recibida = Decimal(str(cantidad_recibida))
+            cantidad_recibida = cantidad_recibida.quantize(Decimal('0.001'))
+
+            costo_unitario = producto_item.get('costo_unitario', Decimal('0.00'))
+            if not isinstance(costo_unitario, Decimal):
+                costo_unitario = Decimal(str(costo_unitario))
+
+            detalle = detalles_por_producto.get(producto.id)
+
+            if not detalle:
+                # Producto adicional no solicitado en la compra original.
+                existe_diferencia = True
+                CompraDetalle.objects.create(
+                    compra_id=compra_id,
+                    producto=producto,
+                    cantidad=cantidad_recibida,
+                    precio_unitario=costo_unitario,
+                    existe_diferencia=True,
+                    es_producto_nuevo=True,
+                    cantidad_entrada=cantidad_recibida,
+                )
+                continue
+
+            cantidad_esperada = detalle.cantidad
+            if not isinstance(cantidad_esperada, Decimal):
+                cantidad_esperada = Decimal(str(cantidad_esperada))
+            cantidad_esperada = cantidad_esperada.quantize(Decimal('0.001'))
+
+            diferencia = (cantidad_esperada - cantidad_recibida).quantize(Decimal('0.001'))
+
+            detalle.cantidad_entrada = cantidad_recibida
+            if diferencia != decimal_zero:
+                existe_diferencia = True
+                detalle.existe_diferencia = True
+
+                # Solo faltantes se envían a incidencias.
+                if diferencia > decimal_zero:
+                    productos_incidencias.append({
+                        'producto': producto,
+                        'cantidad': diferencia,
+                    })
+            else:
+                detalle.existe_diferencia = False
+
+            detalle.save(update_fields=['existe_diferencia', 'cantidad_entrada'])
+
+        # Productos de la compra que no vinieron en el payload => recibidos como 0.
+        for producto_id, detalle in detalles_por_producto.items():
+            if producto_id in productos_recibidos:
+                continue
+
+            cantidad_esperada = detalle.cantidad
+            if not isinstance(cantidad_esperada, Decimal):
+                cantidad_esperada = Decimal(str(cantidad_esperada))
+            cantidad_esperada = cantidad_esperada.quantize(Decimal('0.001'))
+
+            if cantidad_esperada <= decimal_zero:
+                continue
+
+            existe_diferencia = True
+            detalle.existe_diferencia = True
+            detalle.cantidad_entrada = decimal_zero
+            detalle.save(update_fields=['existe_diferencia', 'cantidad_entrada'])
+
+            productos_incidencias.append({
+                'producto': detalle.producto,
+                'cantidad': cantidad_esperada,
+            })
+
         compra.existe_diferencia = existe_diferencia
-        
-        cls._crear_incidencia(productos_incidencias, compra, compra.created_by)
-        
-        
-        
-        
         compra.save(update_fields=['existe_diferencia'])
-    
+
+        if productos_incidencias:
+            cls._crear_incidencia(productos_incidencias, compra, user)
+
     @classmethod
     def procesar_abastecimiento_completo(cls, validated_data, user):
         compra_id = validated_data['compra']
@@ -370,8 +435,7 @@ class AbastecimientoService:
             lotes_creados, productos_abastecidos, costo_total = cls.procesar_items_abastecimiento(
                 items, movimiento_principal, almacen_destino, compra.id, user
             )
-            #Línea sospechosa
-            # cls.procesar_entrada(cls, items, compra_id)
+            cls.procesar_entrada(items, compra_id, user)
 
             cls.actualizar_movimiento_principal(movimiento_principal, items, costo_total)
             cls.actualizar_estados(compra, user)

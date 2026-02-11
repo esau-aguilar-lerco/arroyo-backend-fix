@@ -9,6 +9,7 @@ from apps.erp.models import Cliente
 from apps.contabilidad.models import MetodoPago
 
 import uuid
+from decimal import Decimal
 
     
 class CreditoCliente(BaseModel):
@@ -55,7 +56,12 @@ class CreditoCliente(BaseModel):
         super().save(*args, **kwargs)
     
     def adeudo_actual(self):
-        return float(self.monto) - float(self.monto_pagado)
+        monto = Decimal(str(self.monto or 0))
+        monto_pagado = Decimal(str(self.monto_pagado or 0))
+        adeudo = monto - monto_pagado
+        if adeudo < Decimal('0.00'):
+            adeudo = Decimal('0.00')
+        return adeudo.quantize(Decimal('0.01'))
     
     def abonar(self, monto, metodo_pago=None, usuario=None):
         self.monto_pagado += monto
@@ -67,16 +73,20 @@ class CreditoCliente(BaseModel):
             created_by=usuario
         )
         self.save()
-        if self.adeudo_actual() == 0:
+        if self.adeudo_actual() <= Decimal('0.00'):
            self.marcar_pagado()
         return self
         
     def actualizar_saldo_cliente_dispersion(self):
-        self.cliente.total_credito = float(self.cliente.total_credito) - float(self.monto)
+        total_credito = Decimal(str(self.cliente.total_credito or 0))
+        monto = Decimal(str(self.monto or 0))
+        self.cliente.total_credito = (total_credito - monto).quantize(Decimal('0.01'))
         self.cliente.save(update_fields=["total_credito"])
-        
+
     def actualizar_saldo_cliente_pago(self, monto):
-        self.cliente.total_credito = float(self.cliente.total_credito) + float(monto)
+        total_credito = Decimal(str(self.cliente.total_credito or 0))
+        monto = Decimal(str(monto or 0))
+        self.cliente.total_credito = (total_credito + monto).quantize(Decimal('0.01'))
         self.cliente.save(update_fields=["total_credito"])
 
 
@@ -132,7 +142,12 @@ class CreditoProveedor(BaseModel):
         return timezone.now().date() > self.fecha_vencimiento
 
     def adeudo_actual(self):
-        return float(self.monto) - float(self.monto_pagado)
+        monto = Decimal(str(self.monto or 0))
+        monto_pagado = Decimal(str(self.monto_pagado or 0))
+        adeudo = monto - monto_pagado
+        if adeudo < Decimal('0.00'):
+            adeudo = Decimal('0.00')
+        return adeudo.quantize(Decimal('0.01'))
     
     def abonar(self, monto, metodo_pago=None, usuario=None):
         self.monto_pagado += monto
@@ -144,7 +159,7 @@ class CreditoProveedor(BaseModel):
             created_by=usuario
         )
         self.save()
-        if self.adeudo_actual() == 0:
+        if self.adeudo_actual() <= Decimal('0.00'):
            self.marcar_pagado()
         return self
     
@@ -152,15 +167,19 @@ class CreditoProveedor(BaseModel):
         self.estado = self.PAGADA
         self.is_pagado = True
         self.fecha_pago = timezone.now().date()
-        self.save(update_fields=["is_pagado", "fecha_pago"])
+        self.save(update_fields=["estado", "is_pagado", "fecha_pago"])
     
     
     def actualizar_saldo_proveedor_pago(self, monto):
-        self.proveedor.total_credito = float(self.proveedor.total_credito) - float(monto)
+        total_credito = Decimal(str(self.proveedor.total_credito or 0))
+        monto = Decimal(str(monto or 0))
+        self.proveedor.total_credito = (total_credito - monto).quantize(Decimal('0.01'))
         self.proveedor.save(update_fields=["total_credito"])
-        
+
     def actualizar_saldo_proveedor_dispersion(self):
-        self.proveedor.total_credito = float(self.proveedor.total_credito) + float(self.monto)
+        total_credito = Decimal(str(self.proveedor.total_credito or 0))
+        monto = Decimal(str(self.monto or 0))
+        self.proveedor.total_credito = (total_credito + monto).quantize(Decimal('0.01'))
         self.proveedor.save(update_fields=["total_credito"])
         
     def save(self, *args, **kwargs):

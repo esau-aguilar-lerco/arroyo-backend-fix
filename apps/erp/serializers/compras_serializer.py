@@ -49,7 +49,22 @@ class MetodoPagoSerializer(serializers.Serializer):
         if value <= 0:
             raise serializers.ValidationError("El monto debe ser mayor a cero.")
         return value
-    
+
+    def validate(self, attrs):
+        """
+        Referencia obligatoria para métodos distintos a EFECTIVO/CREDITO.
+        """
+        metodo_pago = attrs.get("metodo_pago")
+        referencia = (attrs.get("referencia") or "").strip()
+        metodo_nombre = (metodo_pago.nombre if metodo_pago else "").upper()
+
+        if metodo_nombre not in {"EFECTIVO", "CREDITO", "CRÉDITO"} and not referencia:
+            raise serializers.ValidationError(
+                {"referencia": "La referencia es obligatoria para este método de pago."}
+            )
+
+        attrs["referencia"] = referencia or None
+        return attrs
 
 
 """
@@ -639,7 +654,8 @@ class CompraSerializer(BaseSerializer):
 
     total_gastos = serializers.SerializerMethodField(read_only=True)
     total_con_gastos = serializers.SerializerMethodField(read_only=True)
-    
+    gastos_detalle = serializers.SerializerMethodField(read_only=True)
+
     detalles = CompraDetalleSerializer(many=True, required=False)
     
     class Meta:
@@ -647,7 +663,7 @@ class CompraSerializer(BaseSerializer):
         fields = [
             'id', 'codigo','is_app', 'orden_compra', 'orden_compra_obj', 'proveedor', 'proveedor_obj',
             'almacen_destino', 'almacen_destino_obj','destino_is_cedis',
-            'total', 'total_gastos', 'total_con_gastos', 'estado',
+            'total', 'total_gastos', 'total_con_gastos', 'gastos_detalle', 'estado',
             "existe_diferencia",
             # 'total_calculado', 'total_productos', 'total_pagado', 'saldo_pendiente',
             'tiempo_recorrido', 'fecha_salida', 'latitud', 'longitud', 'nota',
@@ -690,6 +706,21 @@ class CompraSerializer(BaseSerializer):
         """
         total_base = obj.total or Decimal('0.00')
         return total_base + self.get_total_gastos(obj)
+
+    def get_gastos_detalle(self, obj):
+        """Desglose de gastos adicionales asociados a la compra."""
+        gastos_qs = obj.gastos.exclude(status_model=BaseModel.STATUS_MODEL_DELETE).select_related('created_by')
+        data = []
+        for gasto in gastos_qs:
+            data.append({
+                'id': gasto.id,
+                'monto': gasto.monto,
+                'concepto': gasto.concepto,
+                'descripcion': gasto.descripcion,
+                'created_at': gasto.created_at,
+                'created_by': gasto.created_by.full_name() if gasto.created_by else None,
+            })
+        return data
 
     def validate_detalles(self, detalles):
         """
