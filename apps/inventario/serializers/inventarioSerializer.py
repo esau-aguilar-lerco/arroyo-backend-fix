@@ -30,6 +30,10 @@ class LoteInventarioSerializer(serializers.Serializer):
     fecha_vencimiento = serializers.DateTimeField(read_only=True, format="%Y-%m-%d %H:%M:%S", allow_null=True)
     fecha_ingreso = serializers.DateTimeField(read_only=True, format="%Y-%m-%d %H:%M:%S", allow_null=True)
     ubicacion = serializers.CharField(source='ubicacion.nombre', read_only=True, allow_null=True)
+    precio_publico = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    precio_base = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    precio_unitario = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+
     
     # Calcular estado del lote
     estado = serializers.SerializerMethodField()
@@ -67,6 +71,9 @@ class ProductoInventarioSerializer(serializers.Serializer):
     numero_lotes = serializers.IntegerField(read_only=True, help_text="Número de lotes asociados a este producto activos")
     unidad_medida = serializers.CharField(read_only=True)
     unidad_clave = serializers.CharField(read_only=True)
+    precio_publico = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True, required=False, allow_null=True)
+    precio_base = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True, required=False, allow_null=True)
+    precio_unitario = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True, required=False, allow_null=True)
     #cantidad_disponible = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     lotes_detalle = serializers.SerializerMethodField()
 

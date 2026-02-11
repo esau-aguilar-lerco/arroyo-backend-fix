@@ -23,7 +23,8 @@ from apps.erp.api.embarque_view import (
     EmbarqueRepartoListRetrieveAPIView,
     iniciar_reparto,finalizar_reparto,
     obtener_caja_movimientos_embarque,
-    checkin_producto_embarque
+    checkin_producto_embarque,
+    listado_pedidos_usuario_reparto
 )
 from apps.erp.api.reparto_view import entrega_producto_ruta
 from apps.erp.api.incidencias import IncidenciaListRetrieveAPIView, atender_incidencia_lote
@@ -112,6 +113,7 @@ urlpatterns = [
     path('embarques-reparto/iniciar/',   iniciar_reparto, name='embarque-iniciar-reparto'),
     path('embarques-reparto/finalizar/', finalizar_reparto, name='embarque-finalizar-reparto'),
     path('embarques-reparto/caja-movimientos/', obtener_caja_movimientos_embarque, name='embarque-caja-movimientos'),
+    path('embarques-reparto/pedidos-usuario/', listado_pedidos_usuario_reparto, name='embarque-pedidos-usuario-reparto'),
     path('embarques-reparto/checkin/', checkin_producto_embarque, name='embarque-checkin-producto'),
     # Reparto - entrega de productos
     path('reparto/entrega-producto/', entrega_producto_ruta, name='reparto-entrega-producto'),
