@@ -127,7 +127,7 @@ def crear_movimiento_inventario_almacen_embarque(ruta=None, pedidos=None, produc
     # TARA 
     for producto_data in productos_tara:
         producto = producto_data.get('producto')
-        cantidad = _dqty(producto_data.get('cantidad'))
+        cantidad = Decimal(str(producto_data.get('cantidad')))
         lotes = producto_data.get('lotes', [])
 
         # Precio unitario promedio (ponderado por lote)
@@ -150,7 +150,7 @@ def crear_movimiento_inventario_almacen_embarque(ruta=None, pedidos=None, produc
         )
         for lote_data in lotes:
             lote = lote_data.get('lote')
-            cantidad_lote = _dqty(lote_data.get('cantidad'))
+            cantidad_lote = Decimal(lote_data.get('cantidad'))
             # Asociar el lote al producto_embarque
             models_lote_embarque = LoteProductoEmbarque.objects.create(
                 producto_embarque=producto_embarque,
@@ -165,7 +165,7 @@ def crear_movimiento_inventario_almacen_embarque(ruta=None, pedidos=None, produc
         
         for producto_data in productos:
             producto = producto_data.get('producto')
-            cantidad = _dqty(producto_data.get('cantidad'))
+            cantidad = Decimal(producto_data.get('cantidad'))
             lotes = producto_data.get('lotes', [])
             
             venta_detalle = VentaDetalle.objects.filter(venta=venta, producto=producto).first()
@@ -181,7 +181,7 @@ def crear_movimiento_inventario_almacen_embarque(ruta=None, pedidos=None, produc
             )
             for lote_data in lotes:
                 lote = lote_data.get('lote')
-                cantidad_lote = _dqty(lote_data.get('cantidad'))
+                cantidad_lote = Decimal(lote_data.get('cantidad'))
                 # Asociar el lote al producto_embarque
                 models_lote_embarque = LoteProductoEmbarque.objects.create(
                     producto_embarque=producto_embarque,
@@ -252,10 +252,10 @@ def mover_lotes(productos_a_mover = [],alamcen_destino=None,usuario=None):
     for producto_data in productos_a_mover:
         dictionario_lote = {}
         producto = producto_data.get('producto')
-        cantidad = _dqty(producto_data.get('cantidad'))
+        cantidad = Decimal(str(producto_data.get('cantidad')))
         
         dictionario_lote['producto'] = producto
-        dictionario_lote['cantidad'] = cantidad
+        dictionario_lote['cantidad'] = float(cantidad)
         dictionario_lote['lotes'] = []
         
         lotes = producto_data.get('lotes', [])
@@ -265,7 +265,7 @@ def mover_lotes(productos_a_mover = [],alamcen_destino=None,usuario=None):
             
             # Recargar el lote de la DB para obtener la cantidad actualizada
             lote.refresh_from_db()
-            cantidad_actual = _dqty(lote.cantidad)
+            cantidad_actual = Decimal(str(lote.cantidad))
             
             if cantidad_lote >= cantidad_actual:
                 # El lote se mueve completo (o lo que queda)
@@ -292,7 +292,7 @@ def mover_lotes(productos_a_mover = [],alamcen_destino=None,usuario=None):
                 lote_main = nuevo_lote
                 lotes_afectados.append(nuevo_lote)
             
-            dictionario_lote['lotes'].append({'lote': lote_main, 'cantidad': cantidad_lote})
+            dictionario_lote['lotes'].append({'lote': lote_main, 'cantidad': float(cantidad_lote)})
         productos_new.append(dictionario_lote)
     return productos_new
 
@@ -331,12 +331,12 @@ def _crear_movimiento_tara(almacen=None,almacen_destino=None, productos_entrada=
         for producto_data in productos_entrada:
             #print (f"  Producto para movimiento de tara: {producto_data}")
             producto = producto_data.get('producto')
-            #cantidad_total = _dqty(producto_data.get('cantidad'))
+            #cantidad_total = Decimal(producto_data.get('cantidad'))
             lotes = producto_data.get('lotes', [])
             
             for lote_data in lotes:
                 lote = lote_data.get('lote')
-                cantidad_lote = _dqty(lote_data.get('cantidad'))
+                cantidad_lote = Decimal(lote_data.get('cantidad'))
                 
                 producto_movimiento = ProductosMovimiento.objects.create(
                     movimiento=movimiento,
@@ -452,7 +452,7 @@ def buscar_lotes_para_embarque_fifo(pedidos=None, productos_tara=None, almacen=N
         Retorna dict con lotes asignados y estado de completitud.
         """
         producto_id = obtener_producto_id(producto)
-        cantidad_solicitada = _dqty(cantidad_solicitada)
+        cantidad_solicitada = Decimal(str(cantidad_solicitada))
         cantidad_restante = cantidad_solicitada
         lotes_asignados = []
         
@@ -465,7 +465,7 @@ def buscar_lotes_para_embarque_fifo(pedidos=None, productos_tara=None, almacen=N
             
             # Verificar disponibilidad del lote (puede estar parcialmente usado)
             if lote.id not in lotes_disponibilidad:
-                lotes_disponibilidad[lote.id] = _dqty(lote.cantidad)
+                lotes_disponibilidad[lote.id] = Decimal(str(lote.cantidad))
             
             disponible = lotes_disponibilidad[lote.id]
             
@@ -478,20 +478,20 @@ def buscar_lotes_para_embarque_fifo(pedidos=None, productos_tara=None, almacen=N
             # Registrar asignación
             lotes_asignados.append({
                 'lote': lote,
-                'cantidad': cantidad_usar
+                'cantidad': float(cantidad_usar)
             })
             
             # Actualizar disponibilidad y cantidad restante
-            lotes_disponibilidad[lote.id] = _dqty(lotes_disponibilidad[lote.id] - cantidad_usar)
-            cantidad_restante = _dqty(cantidad_restante - cantidad_usar)
+            lotes_disponibilidad[lote.id] -= cantidad_usar
+            cantidad_restante -= cantidad_usar
         
         cantidad_cubierta = cantidad_solicitada - cantidad_restante
         
         return {
             'producto': producto,
-            'cantidad': cantidad_solicitada,
-            'cantidad_cubierta': _dqty(cantidad_cubierta),
-            'cantidad_faltante': _dqty(cantidad_restante),
+            'cantidad': float(cantidad_solicitada),
+            'cantidad_cubierta': float(cantidad_cubierta),
+            'cantidad_faltante': float(cantidad_restante),
             'completo': cantidad_restante <= 0,
             'lotes': lotes_asignados
         }
@@ -680,7 +680,7 @@ def buscar_lotes_para_embarque(preventas_embarque=None,almacen=None):
                     'producto': producto.id
                 })
                 lotes_usados.append(lote.id)
-                cantidad_restante = _dqty(cantidad_restante - cantidad_usar)
+                cantidad_restante -= cantidad_usar
                     
         
 
