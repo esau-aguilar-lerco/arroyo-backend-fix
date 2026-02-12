@@ -690,27 +690,48 @@ class MovimientoTraspasoAPIView(APIView):
 
 class HistoricoMovimientosDiarioAPIView(APIView):
     """
-    Histórico diario global de movimientos por almacén.
+    Histórico diario de movimientos por producto.
+    - producto_id: obligatorio
+    - almacen_id: opcional (si se envía, filtra al almacén)
     """
     def get(self, request, *args, **kwargs):
-        almacen_id = request.query_params.get('almacen_id')
         producto_id = request.query_params.get('producto_id')
+        almacen_id = request.query_params.get('almacen_id')
         fecha_inicio = request.query_params.get('fecha_inicio')
         fecha_fin = request.query_params.get('fecha_fin')
 
-        if not almacen_id:
+        if not producto_id:
             return Response(
-                {'detail': "El parámetro 'almacen_id' es obligatorio."},
+                {'detail': "El parámetro 'producto_id' es obligatorio."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         try:
-            almacen_id = int(almacen_id)
+            producto_id = int(producto_id)
         except (TypeError, ValueError):
             return Response(
-                {'detail': "El parámetro 'almacen_id' es inválido."},
+                {'detail': "El parámetro 'producto_id' es inválido."},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+        producto = Producto.objects.filter(
+            id=producto_id,
+            status_model=BaseModel.STATUS_MODEL_ACTIVE
+        ).first()
+        if not producto:
+            return Response(
+                {'detail': "Producto no encontrado."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if almacen_id:
+            try:
+                almacen_id = int(almacen_id)
+            except (TypeError, ValueError):
+                return Response(
+                    {'detail': "El parámetro 'almacen_id' es inválido."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
         queryset = ProductosMovimiento.objects.select_related(
             'movimiento',
@@ -720,13 +741,14 @@ class HistoricoMovimientosDiarioAPIView(APIView):
         ).filter(
             status_model=BaseModel.STATUS_MODEL_ACTIVE,
             movimiento__status_model=BaseModel.STATUS_MODEL_ACTIVE,
-        ).filter(
-            models.Q(movimiento__almacen_id=almacen_id) |
-            models.Q(movimiento__almacen_destino_id=almacen_id)
+            producto_id=producto_id,
         )
 
-        if producto_id:
-            queryset = queryset.filter(producto_id=producto_id)
+        if almacen_id:
+            queryset = queryset.filter(
+                models.Q(movimiento__almacen_id=almacen_id) |
+                models.Q(movimiento__almacen_destino_id=almacen_id)
+            )
         if fecha_inicio:
             queryset = queryset.filter(movimiento__created_at__date__gte=fecha_inicio)
         if fecha_fin:
@@ -759,7 +781,9 @@ class HistoricoMovimientosDiarioAPIView(APIView):
 
         return Response({
             'almacen_id': almacen_id,
-            'producto_id': int(producto_id) if producto_id else None,
+            'producto_id': producto_id,
+            'producto_codigo': producto.codigo,
+            'producto_nombre': producto.nombre,
             'fecha_inicio': fecha_inicio,
             'fecha_fin': fecha_fin,
             'resumen_diario': resumen,
