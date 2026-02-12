@@ -189,16 +189,19 @@ def atender_incidencia_lote(request):
                 ):
                     incidencia.descripcion = tipificacion
                     incidencia.save(update_fields=['descripcion'])
-                elif incidencia.descripcion.strip() != tipificacion:
-                    return Response(
-                        {
-                            'detail': (
-                                f"Tipificacion no coincide con la incidencia #{incidencia.id}. "
-                                f"Actual: '{incidencia.descripcion}'"
-                            )
-                        },
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
+                else:
+                    # Cuando la incidencia tiene descripcion de negocio
+                    # (ej. excedente/faltante de compra), no debe bloquearse
+                    # la atencion del lote por una tipificacion distinta.
+                    tipificacion_linea = f"Lote #{incidencia_lote.lote_id}: {tipificacion}"
+                    solucion_actual = (incidencia.solucion or "").strip()
+                    if tipificacion_linea not in solucion_actual:
+                        incidencia.solucion = (
+                            f"{solucion_actual}\n{tipificacion_linea}".strip()
+                            if solucion_actual
+                            else tipificacion_linea
+                        )
+                        incidencia.save(update_fields=['solucion'])
                 
                 # Marcar como atendido
                 incidencia_lote.atendida = True
