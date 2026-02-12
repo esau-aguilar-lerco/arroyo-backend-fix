@@ -186,7 +186,8 @@ class CreditoProveedor(BaseModel):
         if self.pk is None:
             self.dias_plazo = self.proveedor.plazo_credito
             self.fecha_vencimiento = self.fecha + timedelta(days=self.dias_plazo)
-            self.actualizar_saldo_proveedor_pago(self.monto)
+            # Crear un crédito de proveedor incrementa el saldo de crédito disponible.
+            self.actualizar_saldo_proveedor_dispersion()
         super().save(*args, **kwargs)
     
     

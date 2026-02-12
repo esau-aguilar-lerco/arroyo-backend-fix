@@ -7,7 +7,7 @@ from apps.usuarios.models import Usuario
 from apps.erp.models import Producto, Almacen, Rutas
 from django.db import models, transaction
 from django.core.exceptions import ValidationError
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 
 """
@@ -297,15 +297,18 @@ class ProductosMovimiento(BaseModel):
         verbose_name_plural = "Productos en Movimientos"
 
     def save(self, *args, **kwargs):
+        qty_quant = Decimal("0.001")
+        cost_quant = Decimal("0.01")
+
         with transaction.atomic():
             if self.cantidad is not None and not isinstance(self.cantidad, Decimal):
                 self.cantidad = Decimal(str(self.cantidad))
             if self.costo_unitario is not None and not isinstance(self.costo_unitario, Decimal):
                 self.costo_unitario = Decimal(str(self.costo_unitario))
 
-            self.cantidad = self.cantidad or Decimal("0")
-            self.costo_unitario = self.costo_unitario or Decimal("0")
-            self.costo_total = self.cantidad * self.costo_unitario
+            self.cantidad = (self.cantidad or Decimal("0")).quantize(qty_quant, rounding=ROUND_HALF_UP)
+            self.costo_unitario = (self.costo_unitario or Decimal("0")).quantize(cost_quant, rounding=ROUND_HALF_UP)
+            self.costo_total = (self.cantidad * self.costo_unitario).quantize(cost_quant, rounding=ROUND_HALF_UP)
 
             is_new = self._state.adding
             super().save(*args, **kwargs)
@@ -317,6 +320,7 @@ class ProductosMovimiento(BaseModel):
 
             if lote_db.cantidad is not None and not isinstance(lote_db.cantidad, Decimal):
                 lote_db.cantidad = Decimal(str(lote_db.cantidad))
+            lote_db.cantidad = (lote_db.cantidad or Decimal("0")).quantize(qty_quant, rounding=ROUND_HALF_UP)
 
             if self.movimiento.tipo == MovimientoInventario.TIPO_SALIDA:
                 if lote_db.cantidad < self.cantidad:
@@ -324,10 +328,10 @@ class ProductosMovimiento(BaseModel):
                         f"No hay suficiente inventario en el lote {lote_db.id}. "
                         f"Disponible: {lote_db.cantidad}, requerido: {self.cantidad}"
                     )
-                lote_db.cantidad -= self.cantidad
+                lote_db.cantidad = (lote_db.cantidad - self.cantidad).quantize(qty_quant, rounding=ROUND_HALF_UP)
 
             elif self.movimiento.tipo == MovimientoInventario.TIPO_ENTRADA:
-                lote_db.cantidad += self.cantidad
+                lote_db.cantidad = (lote_db.cantidad + self.cantidad).quantize(qty_quant, rounding=ROUND_HALF_UP)
 
             lote_db.save(update_fields=["cantidad", "updated_at"])
 

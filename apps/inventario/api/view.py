@@ -1,4 +1,5 @@
 from django.db import models,transaction
+from django.db.models.functions import TruncDate
 from django.utils import timezone
 from decimal import Decimal, InvalidOperation
 
@@ -15,6 +16,7 @@ from apps.inventario.services.alertasvencimiento import evaluar_vencimiento
 from apps.base.models import BaseModel
 from apps.erp.models import Almacen, Compra, Producto
 from apps.inventario.models import Piso, Zona, Rack,  MovimientoInventario, LoteInventario
+from apps.inventario.models import ProductosMovimiento
 
 #SERIALIZERS
 from ..serializers.distribucionAlamcenSerializer import (PisoSerializer, RackSerializer, ZonaSerializer, PisoMiniSerializer)
@@ -47,6 +49,24 @@ def _to_decimal_or_zero(value):
         return Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError):
         return Decimal("0")
+
+
+def _puede_ver_costos(user):
+    """
+    Restricción de visibilidad de costos/precios para usuarios operativos.
+    """
+    if not user or not getattr(user, 'is_authenticated', False):
+        return False
+    if getattr(user, 'is_superuser', False) or getattr(user, 'is_staff', False):
+        return True
+
+    try:
+        grupos = {g.name.upper() for g in user.groups.all()}
+    except Exception:
+        grupos = set()
+
+    marcadores_gerencia = ("GERENTE", "ADMINISTRADOR", "DIRECCION", "DIRECCIÓN")
+    return any(any(marker in nombre for marker in marcadores_gerencia) for nombre in grupos)
 
 
 """
@@ -668,6 +688,86 @@ class MovimientoTraspasoAPIView(APIView):
         )
 
 
+class HistoricoMovimientosDiarioAPIView(APIView):
+    """
+    Histórico diario global de movimientos por almacén.
+    """
+    def get(self, request, *args, **kwargs):
+        almacen_id = request.query_params.get('almacen_id')
+        producto_id = request.query_params.get('producto_id')
+        fecha_inicio = request.query_params.get('fecha_inicio')
+        fecha_fin = request.query_params.get('fecha_fin')
+
+        if not almacen_id:
+            return Response(
+                {'detail': "El parámetro 'almacen_id' es obligatorio."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            almacen_id = int(almacen_id)
+        except (TypeError, ValueError):
+            return Response(
+                {'detail': "El parámetro 'almacen_id' es inválido."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        queryset = ProductosMovimiento.objects.select_related(
+            'movimiento',
+            'producto',
+            'movimiento__almacen',
+            'movimiento__almacen_destino',
+        ).filter(
+            status_model=BaseModel.STATUS_MODEL_ACTIVE,
+            movimiento__status_model=BaseModel.STATUS_MODEL_ACTIVE,
+        ).filter(
+            models.Q(movimiento__almacen_id=almacen_id) |
+            models.Q(movimiento__almacen_destino_id=almacen_id)
+        )
+
+        if producto_id:
+            queryset = queryset.filter(producto_id=producto_id)
+        if fecha_inicio:
+            queryset = queryset.filter(movimiento__created_at__date__gte=fecha_inicio)
+        if fecha_fin:
+            queryset = queryset.filter(movimiento__created_at__date__lte=fecha_fin)
+
+        resumen = list(
+            queryset.annotate(fecha=TruncDate('movimiento__created_at'))
+            .values('fecha', 'movimiento__tipo')
+            .annotate(
+                total_movimientos=models.Count('id'),
+                cantidad_total=models.Sum('cantidad'),
+            )
+            .order_by('-fecha', 'movimiento__tipo')
+        )
+
+        detalle = []
+        for row in queryset.order_by('-movimiento__created_at', '-id'):
+            detalle.append({
+                'fecha': timezone.localtime(row.movimiento.created_at).strftime('%Y-%m-%d %H:%M:%S'),
+                'tipo': row.movimiento.tipo,
+                'movimiento': row.movimiento.movimiento,
+                'referencia': row.movimiento.referencia,
+                'producto_id': row.producto_id,
+                'producto_codigo': row.producto.codigo if row.producto else None,
+                'producto_nombre': row.producto.nombre if row.producto else None,
+                'cantidad': row.cantidad,
+                'almacen_origen': row.movimiento.almacen.nombre if row.movimiento.almacen else None,
+                'almacen_destino': row.movimiento.almacen_destino.nombre if row.movimiento.almacen_destino else None,
+            })
+
+        return Response({
+            'almacen_id': almacen_id,
+            'producto_id': int(producto_id) if producto_id else None,
+            'fecha_inicio': fecha_inicio,
+            'fecha_fin': fecha_fin,
+            'resumen_diario': resumen,
+            'detalle': detalle,
+            'total_registros': len(detalle),
+        }, status=status.HTTP_200_OK)
+
+
 
 
 
@@ -719,6 +819,7 @@ class InventarioAlmacenAPIView(APIView):
         producto_id = request.query_params.get('producto_id')
         search = request.query_params.get('search', '').strip()
         incluir_lotes = request.query_params.get('incluir_lotes', 'false').lower() == 'true'
+        puede_ver_costos = _puede_ver_costos(request.user)
 
         # Validación de parámetros
         if search and len(search) < 3:
@@ -803,9 +904,9 @@ class InventarioAlmacenAPIView(APIView):
         productos_data = []
         for item in productos_list:
             cantidad_total = _to_decimal_or_zero(item.get('cantidad_total'))
-            valor_total = _to_decimal_or_zero(item.get('valor_total'))
-            precio_publico = _to_decimal_or_zero(item.get('producto__precio_publico'))
-            precio_base = _to_decimal_or_zero(item.get('producto__precio_base'))
+            valor_total = _to_decimal_or_zero(item.get('valor_total')) if puede_ver_costos else Decimal('0')
+            precio_publico = _to_decimal_or_zero(item.get('producto__precio_publico')) if puede_ver_costos else Decimal('0')
+            precio_base = _to_decimal_or_zero(item.get('producto__precio_base')) if puede_ver_costos else Decimal('0')
 
             precio_unitario = (valor_total / cantidad_total) if cantidad_total > 0 else Decimal('0')
             if precio_unitario <= 0:
@@ -816,7 +917,7 @@ class InventarioAlmacenAPIView(APIView):
                 'codigo': item['producto__codigo'],
                 'producto_nombre': item['producto__nombre'],
                 'cantidad_total': item['cantidad_total'],
-                'valor_total': item['valor_total'],
+                'valor_total': valor_total,
                 'precio_publico': precio_publico,
                 'precio_base': precio_base,
                 'precio_unitario': precio_unitario,
@@ -838,7 +939,10 @@ class InventarioAlmacenAPIView(APIView):
             'productos': productos_data
         }
 
-        serializer = InventarioPorAlmacenSerializer(datos_inventario)
+        serializer = InventarioPorAlmacenSerializer(
+            datos_inventario,
+            context={'puede_ver_costos': puede_ver_costos}
+        )
         
         # ✅ RETORNAR SIN PAGINACIÓN
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -906,6 +1010,7 @@ class InventarioAlmacenConsultaAPIView(APIView):
         producto_id = request.query_params.get('producto_id')
         search = request.query_params.get('search', '').strip()
         incluir_lotes = request.query_params.get('incluir_lotes', 'false').lower() == 'true'
+        puede_ver_costos = _puede_ver_costos(request.user)
 
         # Validación de parámetros
         if search and len(search) < 2:
@@ -1041,7 +1146,7 @@ class InventarioAlmacenConsultaAPIView(APIView):
                 lotes_por_producto[lote.producto_id].append({
                     'id': lote.id,
                     'cantidad': lote.cantidad,
-                    'costo_unitario': lote.costo_unitario,
+                    'costo_unitario': lote.costo_unitario if puede_ver_costos else Decimal('0.00'),
                     'fecha_vencimiento': lote.fecha_vencimiento.strftime('%Y-%m-%d') if lote.fecha_vencimiento else None,
                     'fecha_ingreso': lote.fecha_ingreso.strftime('%Y-%m-%d %H:%M:%S') if lote.fecha_ingreso else None,
                     'ubicacion': lote.ubicacion.nombre if lote.ubicacion else None
@@ -1051,9 +1156,9 @@ class InventarioAlmacenConsultaAPIView(APIView):
         productos_data = []
         for item in productos_paginados:
             cantidad_total = _to_decimal_or_zero(item.get('cantidad_total'))
-            valor_total = _to_decimal_or_zero(item.get('valor_total'))
-            precio_publico = _to_decimal_or_zero(item.get('producto__precio_publico'))
-            precio_base = _to_decimal_or_zero(item.get('producto__precio_base'))
+            valor_total = _to_decimal_or_zero(item.get('valor_total')) if puede_ver_costos else Decimal('0')
+            precio_publico = _to_decimal_or_zero(item.get('producto__precio_publico')) if puede_ver_costos else Decimal('0')
+            precio_base = _to_decimal_or_zero(item.get('producto__precio_base')) if puede_ver_costos else Decimal('0')
 
             precio_unitario = (valor_total / cantidad_total) if cantidad_total > 0 else Decimal('0')
             if precio_unitario <= 0:
@@ -1064,7 +1169,7 @@ class InventarioAlmacenConsultaAPIView(APIView):
                 'codigo': item['producto__codigo'],
                 'producto_nombre': item['producto__nombre'],
                 'cantidad_total': item['cantidad_total'],
-                'valor_total': item['valor_total'],
+                'valor_total': valor_total,
                 'precio_publico': precio_publico,
                 'precio_base': precio_base,
                 'precio_unitario': precio_unitario,
@@ -1129,6 +1234,7 @@ class InventarioProductoAPIView(APIView):
     """
     def get(self, request, *args, **kwargs):
         user = request.user
+        puede_ver_costos = _puede_ver_costos(user)
         producto_id = request.query_params.get('producto_id')
         almacen_id = request.query_params.get('almacen_id')
         incluir_lotes = True#request.query_params.get('incluir_lotes', 'false').lower() == 'true'
@@ -1183,7 +1289,7 @@ class InventarioProductoAPIView(APIView):
         inventario_dict = {
             item['almacen__id']: {
                 'cantidad_total': item['cantidad_total'],
-                'valor_total': item['valor_total'],
+                'valor_total': item['valor_total'] if puede_ver_costos else Decimal('0.00'),
                 'numero_lotes': item['numero_lotes']
             }
             for item in inventario_por_almacen
@@ -1199,15 +1305,15 @@ class InventarioProductoAPIView(APIView):
         
         # Obtener costo del último lote
         ultimo_lote = lotes_query.order_by('-fecha_ingreso').first()
-        costo_ultimo_lote = ultimo_lote.costo_unitario if ultimo_lote else 0
+        costo_ultimo_lote = (ultimo_lote.costo_unitario if ultimo_lote else 0) if puede_ver_costos else Decimal('0.00')
         
         # ========== PASO 4: PREPARAR DATOS DEL PRODUCTO ==========
         datos_producto = {
             'producto_id': producto.id,
             'producto_nombre': producto.nombre,
             'producto_codigo': producto.codigo or 'Sin código',
-            'precio_publico': producto.precio_publico or 0,
-            'precio_mayoreo': producto.precio_mayoreo or 0,
+            'precio_publico': (producto.precio_publico or 0) if puede_ver_costos else Decimal('0.00'),
+            'precio_mayoreo': (producto.precio_mayoreo or 0) if puede_ver_costos else Decimal('0.00'),
             'costo_ultimo_lote': costo_ultimo_lote,
             'unidad_medida': producto.unidad_sat.nombre if producto.unidad_sat else 'Sin unidad',
             'unidad_clave': producto.unidad_sat.clave if producto.unidad_sat else 'N/A',
@@ -1268,7 +1374,10 @@ class InventarioProductoAPIView(APIView):
                     setattr(self, key, value)
         
         datos_obj = DatosProducto(**datos_producto)
-        serializer = DetalleInventarioPorProductoSerializer(datos_obj)
+        serializer = DetalleInventarioPorProductoSerializer(
+            datos_obj,
+            context={'puede_ver_costos': puede_ver_costos}
+        )
         
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -2098,5 +2207,3 @@ class AbastecimientoCreateView(APIView):
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
-

@@ -12,7 +12,15 @@ class AbastecimientoService:
     Servicio para manejar la lógica de abastecimiento de inventario
     """
     @staticmethod
-    def _crear_lote_incidencia(producto, cantidad, user):
+    def _to_decimal(value, *, places='0.001'):
+        if isinstance(value, Decimal):
+            decimal_value = value
+        else:
+            decimal_value = Decimal(str(value or 0))
+        return decimal_value.quantize(Decimal(places))
+
+    @staticmethod
+    def _crear_lote_incidencia(producto, cantidad, user, *, costo_unitario=Decimal('0.00'), cantidad_lote=None):
         """
         Crea un lote de inventario para la incidencia
         """
@@ -20,11 +28,20 @@ class AbastecimientoService:
         if not almacen:
             raise ValueError("No existe un almacén de incidencias configurado")
 
+        cantidad_incidencia = AbastecimientoService._to_decimal(cantidad)
+        if cantidad_lote is None:
+            cantidad_lote = cantidad_incidencia
+        else:
+            cantidad_lote = AbastecimientoService._to_decimal(cantidad_lote)
+
+        if cantidad_lote < Decimal('0.000'):
+            cantidad_lote = Decimal('0.000')
+
         lote = LoteInventario.objects.create(
             producto=producto,
             almacen=almacen,
-            cantidad=cantidad,
-            costo_unitario=Decimal('0.00'),
+            cantidad=cantidad_lote,
+            costo_unitario=AbastecimientoService._to_decimal(costo_unitario, places='0.01'),
             fecha_ingreso=timezone.now(),
             created_by=user,
             #updated_by=user
@@ -35,38 +52,48 @@ class AbastecimientoService:
     @staticmethod
     def _crear_incidencia(productos_incidencias, compra, user):
         """
-        Crea una incidencia para los productos con diferencias en la entrada
+        Crea incidencias por producto para cada diferencia detectada en la entrada.
         """
-        #from apps.erp.models import 
-
         if not productos_incidencias:
-            return None
+            return []
 
-        incidencia_obj = IncidenciaModel.objects.create(
-            descripcion=f"Incidencia generada por diferencias en la entrada de la compra {compra.codigo}",
-            resuelta=False,
-            created_by=user,
-            #updated_by=user
-        )
-
+        incidencias_creadas = []
         for item in productos_incidencias:
-            lote = AbastecimientoService._crear_lote_incidencia(
-                producto=item['producto'],
-                cantidad=item['cantidad'],
-                user=user
+            producto = item['producto']
+            descripcion = item.get(
+                'descripcion',
+                f"Incidencia en recepción de {producto.codigo or producto.nombre} para compra {compra.codigo}",
             )
-            
+            incidencia_obj = IncidenciaModel.objects.create(
+                descripcion=descripcion,
+                resuelta=False,
+                created_by=user,
+            )
+            cantidad_afectada = AbastecimientoService._to_decimal(item.get('cantidad', Decimal('0.000')))
+            afecta_inventario = item.get('afectar_inventario', True)
+            cantidad_lote = cantidad_afectada if afecta_inventario else Decimal('0.000')
+
+            lote = AbastecimientoService._crear_lote_incidencia(
+                producto=producto,
+                cantidad=cantidad_afectada,
+                user=user,
+                costo_unitario=item.get('costo_unitario', Decimal('0.00')),
+                cantidad_lote=cantidad_lote,
+            )
+
             IncidenciaLote.objects.create(
                 incidencia=incidencia_obj,
                 lote=lote,  # No hay lote asociado en este caso
                 #producto=item['producto'],
-                cantidad=item['cantidad'],
+                cantidad=cantidad_afectada,
                 atendida=False,
+                nota=item.get('nota'),
                 created_by=user,
                 updated_by=user
             )
+            incidencias_creadas.append(incidencia_obj.id)
 
-        return incidencia_obj
+        return incidencias_creadas
     
     @staticmethod
     def validar_compra(compra_id, *, lock=False, nowait=False):
@@ -308,12 +335,8 @@ class AbastecimientoService:
     @classmethod
     def procesar_entrada(cls, items, compra_id, user):
         """
-        Registra diferencias entre lo solicitado en compra y lo efectivamente recibido.
-
-        Regla principal:
-        - Si se recibe menos cantidad que la solicitada, el faltante se manda a incidencias.
-        - Si un producto de la compra no se recibe, se manda todo su faltante a incidencias.
-        - Lo recibido sí entra a inventario por el flujo normal de lotes/movimientos.
+        Registra diferencias entre lo solicitado y lo recibido, y retorna los ítems
+        normalizados que SÍ deben impactar inventario.
         """
         decimal_zero = Decimal('0.000')
 
@@ -324,6 +347,7 @@ class AbastecimientoService:
         productos_recibidos = set()
         productos_incidencias = []
         existe_diferencia = False
+        items_normalizados = []
 
         for producto_item in items:
             producto_value = producto_item.get('producto')
@@ -344,11 +368,13 @@ class AbastecimientoService:
             costo_unitario = producto_item.get('costo_unitario', Decimal('0.00'))
             if not isinstance(costo_unitario, Decimal):
                 costo_unitario = Decimal(str(costo_unitario))
+            costo_unitario = costo_unitario.quantize(Decimal('0.01'))
 
             detalle = detalles_por_producto.get(producto.id)
+            cantidad_aceptada = cantidad_recibida
 
             if not detalle:
-                # Producto adicional no solicitado en la compra original.
+                # Producto no solicitado: no impacta CEDIS y va directo a incidencia.
                 existe_diferencia = True
                 CompraDetalle.objects.create(
                     compra_id=compra_id,
@@ -357,8 +383,16 @@ class AbastecimientoService:
                     precio_unitario=costo_unitario,
                     existe_diferencia=True,
                     es_producto_nuevo=True,
-                    cantidad_entrada=cantidad_recibida,
+                    cantidad_entrada=decimal_zero,
                 )
+                productos_incidencias.append({
+                    'producto': producto,
+                    'cantidad': cantidad_recibida,
+                    'afectar_inventario': True,
+                    'costo_unitario': costo_unitario,
+                    'nota': 'Producto adicional no solicitado en la compra.',
+                    'descripcion': f"Producto adicional no solicitado en compra {compra.codigo}: {producto.codigo or producto.nombre}",
+                })
                 continue
 
             cantidad_esperada = detalle.cantidad
@@ -366,23 +400,44 @@ class AbastecimientoService:
                 cantidad_esperada = Decimal(str(cantidad_esperada))
             cantidad_esperada = cantidad_esperada.quantize(Decimal('0.001'))
 
-            diferencia = (cantidad_esperada - cantidad_recibida).quantize(Decimal('0.001'))
-
-            detalle.cantidad_entrada = cantidad_recibida
-            if diferencia != decimal_zero:
+            if cantidad_recibida > cantidad_esperada:
+                # No se acepta más de lo solicitado; excedente se manda a incidencias.
                 existe_diferencia = True
                 detalle.existe_diferencia = True
-
-                # Solo faltantes se envían a incidencias.
-                if diferencia > decimal_zero:
-                    productos_incidencias.append({
-                        'producto': producto,
-                        'cantidad': diferencia,
-                    })
+                cantidad_aceptada = cantidad_esperada
+                excedente = (cantidad_recibida - cantidad_esperada).quantize(Decimal('0.001'))
+                productos_incidencias.append({
+                    'producto': producto,
+                    'cantidad': excedente,
+                    'afectar_inventario': True,
+                    'costo_unitario': costo_unitario,
+                    'nota': 'Excedente recibido respecto a la cantidad solicitada.',
+                    'descripcion': f"Excedente en recepción de compra {compra.codigo} para {producto.codigo or producto.nombre}",
+                })
+            elif cantidad_recibida < cantidad_esperada:
+                existe_diferencia = True
+                detalle.existe_diferencia = True
+                faltante = (cantidad_esperada - cantidad_recibida).quantize(Decimal('0.001'))
+                productos_incidencias.append({
+                    'producto': producto,
+                    'cantidad': faltante,
+                    'afectar_inventario': True,
+                    'costo_unitario': costo_unitario,
+                    'nota': 'Faltante detectado en recepción de compra.',
+                    'descripcion': f"Faltante en recepción de compra {compra.codigo} para {producto.codigo or producto.nombre}",
+                })
             else:
                 detalle.existe_diferencia = False
 
+            detalle.cantidad_entrada = cantidad_aceptada
             detalle.save(update_fields=['existe_diferencia', 'cantidad_entrada'])
+
+            if cantidad_aceptada > decimal_zero:
+                item_normalizado = dict(producto_item)
+                item_normalizado['producto'] = producto
+                item_normalizado['cantidad'] = cantidad_aceptada
+                item_normalizado['costo_unitario'] = costo_unitario
+                items_normalizados.append(item_normalizado)
 
         # Productos de la compra que no vinieron en el payload => recibidos como 0.
         for producto_id, detalle in detalles_por_producto.items():
@@ -405,6 +460,10 @@ class AbastecimientoService:
             productos_incidencias.append({
                 'producto': detalle.producto,
                 'cantidad': cantidad_esperada,
+                'afectar_inventario': True,
+                'costo_unitario': detalle.precio_unitario,
+                'nota': 'Producto no recibido durante la entrada.',
+                'descripcion': f"Producto no recibido en compra {compra.codigo}: {detalle.producto.codigo or detalle.producto.nombre}",
             })
 
         compra.existe_diferencia = existe_diferencia
@@ -412,6 +471,8 @@ class AbastecimientoService:
 
         if productos_incidencias:
             cls._crear_incidencia(productos_incidencias, compra, user)
+
+        return items_normalizados
 
     @classmethod
     def procesar_abastecimiento_completo(cls, validated_data, user):
@@ -432,16 +493,18 @@ class AbastecimientoService:
 
             movimiento_principal = cls.crear_movimiento_principal(almacen_destino, referencia, nota, user)
 
-            lotes_creados, productos_abastecidos, costo_total = cls.procesar_items_abastecimiento(
-                items, movimiento_principal, almacen_destino, compra.id, user
-            )
-            cls.procesar_entrada(items, compra_id, user)
+            # Normalizar cantidades aceptadas antes de afectar inventario.
+            items_aceptados = cls.procesar_entrada(items, compra_id, user)
 
-            cls.actualizar_movimiento_principal(movimiento_principal, items, costo_total)
+            lotes_creados, productos_abastecidos, costo_total = cls.procesar_items_abastecimiento(
+                items_aceptados, movimiento_principal, almacen_destino, compra.id, user
+            )
+
+            cls.actualizar_movimiento_principal(movimiento_principal, items_aceptados, costo_total)
             cls.actualizar_estados(compra, user)
 
             return cls.construir_respuesta(
                 movimiento_principal, compra, almacen_destino,
-                items, costo_total, productos_abastecidos,
+                items_aceptados, costo_total, productos_abastecidos,
                 lotes_creados, referencia, nota, user
             )
