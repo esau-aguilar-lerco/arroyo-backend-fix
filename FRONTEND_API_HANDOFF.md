@@ -98,9 +98,11 @@ Documento de integración Frontend <-> Backend para los flujos operativos críti
 
 ### 3.4 Histórico diario de movimientos (nuevo para front)
 
-- `GET /api/movimiento/historico-diario/?almacen_id={id}&producto_id={id?}&fecha_inicio=YYYY-MM-DD&fecha_fin=YYYY-MM-DD`
-  - Params obligatorios: `almacen_id`
+- `GET /api/movimiento/historico-diario/?producto_id={id}&almacen_id={id?}&fecha_inicio=YYYY-MM-DD&fecha_fin=YYYY-MM-DD`
+  - Params obligatorios: `producto_id`
+  - Params opcionales: `almacen_id`, `fecha_inicio`, `fecha_fin`
   - Respuesta:
+    - `producto_id`, `producto_codigo`, `producto_nombre`
     - `resumen_diario[]` (fecha, tipo, totales)
     - `detalle[]` (movimiento por producto con referencia)
     - `total_registros`
@@ -281,4 +283,3 @@ Documento de integración Frontend <-> Backend para los flujos operativos críti
 6. Cierre de reparto debe resolver caja-movimientos sin 404.
 7. Crédito proveedor debe mostrar abonos y permitir liquidación total/parcial.
 8. Notificaciones deben listar y marcar leídas (individual y masivo).
-
