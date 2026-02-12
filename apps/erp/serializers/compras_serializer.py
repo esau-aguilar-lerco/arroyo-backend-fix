@@ -237,12 +237,9 @@ class OrdenCompraSerializer(BaseSerializer):
         """
         if not detalles:
             raise serializers.ValidationError("Debe incluir al menos un producto en la orden de compra.")
-        
-        # Validar que no haya productos duplicados
-        productos_ids = [detalle['producto'].id for detalle in detalles]
-        if len(productos_ids) != len(set(productos_ids)):
-            raise serializers.ValidationError("No se pueden incluir productos duplicados en la orden de compra.")
-        
+
+        # Se permiten líneas repetidas del mismo producto para manejar
+        # distintas negociaciones/precios dentro de una misma orden.
         return detalles
 
     def validate(self, data):

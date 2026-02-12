@@ -7,6 +7,7 @@ from apps.inventario.api.alertas.alertasview import ProductosPorVencerAPIView
 from apps.inventario.api.view import (
     PisoViewSet, ZonaViewSet, RackViewSet, PisoPorAlmacenAPIView,
     MovimientoSalidaViewSet, MovimientoTraspasoAPIView,
+    HistoricoMovimientosDiarioAPIView,
     InventarioAlmacenAPIView,
     InventarioAlmacenConsultaAPIView,
 
@@ -84,6 +85,7 @@ urlpatterns = [
     # Movimientos de traspaso (list y detail)
     path('movimiento/traspaso-list/', MovimientoTraspasoAPIView.as_view(), name='movimientos-por-filtro-list'),
     path('movimiento/traspaso-list/<int:pk>/', MovimientoTraspasoAPIView.as_view(), name='movimientos-por-filtro-detail'),
+    path('movimiento/historico-diario/', HistoricoMovimientosDiarioAPIView.as_view(), name='movimientos-historico-diario'),
 
 
     #=============================================

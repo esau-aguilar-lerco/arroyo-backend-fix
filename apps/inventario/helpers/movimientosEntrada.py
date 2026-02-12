@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from apps.inventario.models import MovimientoInventario, ProductosMovimiento, LoteInventario
 from apps.erp.models import incidencia as IncidenciaModel, IncidenciaLote, Almacen
@@ -49,6 +49,7 @@ def create_movimiento_entrada(model_movimiento,productos_con_lote, user=None,ref
                 cantidad = lote_data['cantidad']
                 if not isinstance(cantidad, Decimal):
                     cantidad = Decimal(str(cantidad))
+                cantidad = cantidad.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
 
                 # En traspasos usar el lote del almacén virtual para no tocar CEDIS
                 lote = lote_origen
@@ -71,6 +72,9 @@ def create_movimiento_entrada(model_movimiento,productos_con_lote, user=None,ref
                             lote = lote_virtual
 
                 cantidad_enviada = lote.cantidad
+                if not isinstance(cantidad_enviada, Decimal):
+                    cantidad_enviada = Decimal(str(cantidad_enviada))
+                cantidad_enviada = cantidad_enviada.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
 
                 # Validar que la cantidad solicitada no exceda el lote disponible
                 if cantidad_enviada < cantidad:
@@ -80,7 +84,7 @@ def create_movimiento_entrada(model_movimiento,productos_con_lote, user=None,ref
                     )
 
                 # Si se recibe menos de lo enviado, lo restante va a incidencias
-                diferencia = cantidad_enviada - cantidad
+                diferencia = (cantidad_enviada - cantidad).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
                 if diferencia > 0:
                     lotes_incidencias.append({
                         'producto': producto,

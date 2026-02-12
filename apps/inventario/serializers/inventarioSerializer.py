@@ -57,6 +57,15 @@ class LoteInventarioSerializer(serializers.Serializer):
         else:
             return "ACTIVO"
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if not self.context.get('puede_ver_costos', True):
+            data['costo_unitario'] = '0.00'
+            data['precio_publico'] = '0.00'
+            data['precio_base'] = '0.00'
+            data['precio_unitario'] = '0.00'
+        return data
+
 
 
 class ProductoInventarioSerializer(serializers.Serializer):
