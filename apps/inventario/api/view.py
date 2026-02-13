@@ -660,15 +660,13 @@ class MovimientoTraspasoAPIView(APIView):
         Obtiene el detalle completo de un movimiento
         """
         try:
-            movimiento =MovimientoInventario.objects.all(
-            
-        ).select_related(
-            'almacen',
-            'almacen_destino'
-        ).prefetch_related(
-            'productosMovimiento__producto__unidad_sat',
-            'productosMovimiento__lote'
-        ).order_by('-created_at').get(pk=pk)
+            movimiento = MovimientoInventario.objects.select_related(
+                'almacen',
+                'almacen_destino'
+            ).prefetch_related(
+                'productosMovimiento__producto__unidad_sat',
+                'productosMovimiento__lote'
+            ).get(pk=pk)
         except MovimientoInventario.DoesNotExist:
             return Response(
                 {
@@ -677,8 +675,52 @@ class MovimientoTraspasoAPIView(APIView):
                 },
                 status=status.HTTP_404_NOT_FOUND
             )
-        
-        serializer = MovimientoPrincipalSerializer(movimiento)
+
+        # El serializer de detalle espera "productos" como una lista agrupada por producto.
+        productos_dict = {}
+        for pm in movimiento.productosMovimiento.all():
+            if not pm.producto:
+                continue
+
+            producto_id = pm.producto.id
+            if producto_id not in productos_dict:
+                productos_dict[producto_id] = {
+                    'producto': pm.producto,
+                    'cantidad': 0,
+                    'lotes': []
+                }
+
+            productos_dict[producto_id]['cantidad'] += pm.cantidad
+            if pm.lote:
+                productos_dict[producto_id]['lotes'].append({
+                    'lote': str(pm.lote.id),
+                    'cantidad': pm.cantidad
+                })
+
+        productos_data = []
+        for _, data in productos_dict.items():
+            productos_data.append({
+                'producto': data['producto'],
+                'cantidad': data['cantidad'],
+                'lotes': data['lotes']
+            })
+
+        movimiento_data = {
+            'id': movimiento.id,
+            'detalle_nota': movimiento.detalle_nota,
+            'folio': movimiento.folio,
+            'created_at': movimiento.created_at,
+            'almacen': movimiento.almacen,
+            'almacen_destino': movimiento.almacen_destino,
+            'movimiento': movimiento.movimiento,
+            'tipo': movimiento.tipo,
+            'referencia': movimiento.referencia,
+            'cantidad': movimiento.cantidad,
+            'nota': movimiento.nota,
+            'productos': productos_data,
+        }
+
+        serializer = MovimientoPrincipalSerializer(movimiento_data)
         return Response(
             {
                 'success': True,
