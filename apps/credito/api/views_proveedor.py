@@ -32,7 +32,12 @@ class CreditoProveedorMiniViewSet(mixins.ListModelMixin, mixins.RetrieveModelMix
     
     def get_queryset(self):
         """Queryset con filtro opcional por proveedor"""
-        queryset = CreditoProveedor.objects.all().select_related('proveedor').order_by('created_at')
+        queryset = (
+            CreditoProveedor.objects
+            .filter(status_model=CreditoProveedor.STATUS_MODEL_ACTIVE)
+            .select_related('proveedor')
+            .order_by('created_at')
+        )
         
         # Filtrar por proveedor si se proporciona
         proveedor_id = self.request.query_params.get('proveedor')
@@ -73,7 +78,9 @@ class CreditoProveedorViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, 
     - GET /api/creditos-proveedor/estadisticas/ - Estadísticas generales
     - GET /api/creditos-proveedor/estadisticas-proveedor/{proveedor_id}/ - Estadísticas por proveedor
     """
-    queryset = CreditoProveedor.objects.select_related(
+    queryset = CreditoProveedor.objects.filter(
+        status_model=CreditoProveedor.STATUS_MODEL_ACTIVE
+    ).select_related(
         'proveedor', 'created_by', 'updated_by'
     ).prefetch_related('pagos_proveedor').order_by('created_at')
     
@@ -668,7 +675,10 @@ class PagosCreditoProveedorViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         """Queryset con select_related para optimizar consultas"""
-        queryset = PagosCreditoProveedor.objects.select_related(
+        queryset = PagosCreditoProveedor.objects.filter(
+            status_model=PagosCreditoProveedor.STATUS_MODEL_ACTIVE,
+            credito_proveedor__status_model=CreditoProveedor.STATUS_MODEL_ACTIVE,
+        ).select_related(
             'credito_proveedor', 'credito_proveedor__proveedor', 'metodo_pago', 'created_by'
         )
         
