@@ -1,7 +1,10 @@
+from decimal import Decimal, InvalidOperation
+
 from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from django.db import transaction
 from django.db.models import Q, Sum, Count, Max, Min
 from django.utils import timezone
 from datetime import timedelta
@@ -11,6 +14,7 @@ from drf_spectacular.types import OpenApiTypes
 
 from apps.base.serachFilter import MinimalSearchFilter
 from apps.credito.models import CreditoProveedor, PagosCreditoProveedor
+from apps.contabilidad.models import MetodoPago
 from apps.credito.serializers.credito_proveedor import (
     CreditoProveedorSerializer,
     CreditoProveedorMiniSerializer,
@@ -672,6 +676,63 @@ class PagosCreditoProveedorViewSet(viewsets.ModelViewSet):
     ViewSet para gestión de pagos de crédito de proveedor
     """
     permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _to_money(value, field_name='monto'):
+        try:
+            amount = Decimal(str(value)).quantize(Decimal('0.01'))
+        except (InvalidOperation, TypeError, ValueError):
+            raise ValueError(f'Valor inválido en {field_name}.')
+        if amount <= Decimal('0.00'):
+            raise ValueError(f'{field_name} debe ser mayor a cero.')
+        return amount
+
+    def _build_payment_pool(self, pagos):
+        if not isinstance(pagos, list) or not pagos:
+            raise ValueError('Debe proporcionar al menos un pago.')
+
+        pool = []
+        total = Decimal('0.00')
+        for idx, pago in enumerate(pagos, start=1):
+            if not isinstance(pago, dict):
+                raise ValueError(f'Formato inválido en pagos[{idx}].')
+
+            metodo_raw = pago.get('metodo_pago')
+            metodo_id = metodo_raw.get('id') if isinstance(metodo_raw, dict) else metodo_raw
+            metodo = MetodoPago.objects.filter(id=metodo_id).first()
+            if not metodo:
+                raise ValueError(f'Método de pago inválido en pagos[{idx}].')
+
+            monto = self._to_money(pago.get('monto'), f'pagos[{idx}].monto')
+            referencia = (pago.get('referencia') or '').strip()
+            pool.append({
+                'metodo_pago': metodo.id,
+                'referencia': referencia,
+                'restante': monto,
+            })
+            total += monto
+        return pool, total
+
+    @staticmethod
+    def _consume_pool(pool, objetivo):
+        restante = objetivo.quantize(Decimal('0.01'))
+        pagos_credito = []
+        for item in pool:
+            if restante <= Decimal('0.00'):
+                break
+            if item['restante'] <= Decimal('0.00'):
+                continue
+            usar = min(item['restante'], restante).quantize(Decimal('0.01'))
+            if usar <= Decimal('0.00'):
+                continue
+            pagos_credito.append({
+                'metodo_pago': item['metodo_pago'],
+                'monto': str(usar),
+                'referencia': item['referencia'],
+            })
+            item['restante'] = (item['restante'] - usar).quantize(Decimal('0.01'))
+            restante = (restante - usar).quantize(Decimal('0.01'))
+        return pagos_credito, restante
     
     def get_queryset(self):
         """Queryset con select_related para optimizar consultas"""
@@ -762,6 +823,110 @@ class PagosCreditoProveedorViewSet(viewsets.ModelViewSet):
                 'detail': str(e),
                 'error_code': 'ERROR_REGISTRO_PAGO_PROVEEDOR'
             }, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['post'], url_path='prelacion')
+    @transaction.atomic
+    def prelacion(self, request):
+        """
+        Aplica un pago global a los créditos activos de un proveedor por prelación:
+        primero al crédito más antiguo por fecha de vencimiento.
+        """
+        proveedor_id = request.data.get('proveedor')
+        if not proveedor_id:
+            return Response(
+                {'detail': 'Debe enviar el campo proveedor.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            cantidad_pagar = self._to_money(request.data.get('cantidad_pagar'), 'cantidad_pagar')
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            pool, total_pagos = self._build_payment_pool(request.data.get('pagos', []))
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        if total_pagos != cantidad_pagar:
+            return Response(
+                {
+                    'detail': (
+                        f'El total de pagos (${total_pagos}) debe coincidir '
+                        f'con cantidad_pagar (${cantidad_pagar}).'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        creditos = list(
+            CreditoProveedor.objects.filter(
+                proveedor_id=proveedor_id,
+                is_pagado=False,
+                status_model=CreditoProveedor.STATUS_MODEL_ACTIVE,
+            ).order_by('fecha_vencimiento', 'fecha', 'id')
+        )
+        if not creditos:
+            return Response(
+                {'detail': 'El proveedor no tiene créditos activos para aplicar prelación.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        adeudo_total = sum((c.adeudo_actual() for c in creditos), Decimal('0.00')).quantize(Decimal('0.01'))
+        if cantidad_pagar > adeudo_total:
+            return Response(
+                {'detail': f'La cantidad a pagar (${cantidad_pagar}) excede el adeudo total (${adeudo_total}).'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        restante_global = cantidad_pagar
+        aplicaciones = []
+
+        for credito in creditos:
+            if restante_global <= Decimal('0.00'):
+                break
+            adeudo = credito.adeudo_actual()
+            if adeudo <= Decimal('0.00'):
+                continue
+
+            monto_aplicar = min(adeudo, restante_global).quantize(Decimal('0.01'))
+            pagos_credito, faltante = self._consume_pool(pool, monto_aplicar)
+            if faltante > Decimal('0.00'):
+                return Response(
+                    {'detail': 'No fue posible distribuir los pagos para completar la prelación.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            payload = {
+                'credito': credito.id,
+                'cantidad_pagar': str(monto_aplicar),
+                'pagos': pagos_credito,
+            }
+            serializer = PagoCreditoProveedorCreateSingularSerializer(data=payload, context={'request': request})
+            serializer.is_valid(raise_exception=True)
+            credito_actualizado = serializer.save()
+
+            aplicaciones.append({
+                'credito_id': credito_actualizado.id,
+                'fecha_vencimiento': credito_actualizado.fecha_vencimiento,
+                'monto_aplicado': float(monto_aplicar),
+                'adeudo_restante': float(credito_actualizado.adeudo_actual()),
+                'estado': credito_actualizado.estado,
+            })
+            restante_global = (restante_global - monto_aplicar).quantize(Decimal('0.01'))
+
+        return Response(
+            {
+                'detail': 'Pago aplicado por prelación correctamente.',
+                'data': {
+                    'proveedor_id': int(proveedor_id),
+                    'monto_aplicado': float(cantidad_pagar),
+                    'aplicaciones': aplicaciones,
+                    'total_creditos_afectados': len(aplicaciones),
+                },
+            },
+            status=status.HTTP_201_CREATED,
+        )
     
     @extend_schema(exclude=True)
     def update(self, request, *args, **kwargs):

@@ -1,8 +1,11 @@
+from decimal import Decimal, InvalidOperation
+
 from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from django.db.models import Q, Sum, Count
+from django.db import transaction
+from django.db.models import Q, Sum, Count, Max, Min
 from django.utils import timezone
 from datetime import timedelta
 
@@ -11,6 +14,7 @@ from drf_spectacular.types import OpenApiTypes
 
 from apps.base.serachFilter import MinimalSearchFilter
 from apps.credito.models import CreditoCliente, PagosCredito
+from apps.contabilidad.models import MetodoPago
 from apps.credito.serializers.credito import (
     CreditoClienteSerializer,
     CreditoClienteMiniSerializer,
@@ -59,6 +63,79 @@ class CreditoClienteViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, vi
         if self.action == 'retrieve':
             return CreditoClienteListSerializer
         return CreditoClienteMiniSerializer
+
+    def _agrupar_por_cliente(self, queryset):
+        """
+        Agrupar créditos por cliente con totales consolidados.
+        """
+        hoy = timezone.now().date()
+        agrupados = (
+            queryset.values(
+                'cliente_id',
+                'cliente__codigo',
+                'cliente__nombre',
+                'cliente__apellido_paterno',
+                'cliente__apellido_materno',
+                'cliente__razon_social',
+            )
+            .annotate(
+                total_creditos=Count('id'),
+                total_dispersado=Sum('monto'),
+                total_pagado=Sum('monto_pagado'),
+                fecha_ultimo_credito=Max('fecha'),
+                fecha_vencimiento_proxima=Min('fecha_vencimiento', filter=Q(is_pagado=False)),
+                creditos_vencidos=Count('id', filter=Q(is_pagado=False, fecha_vencimiento__lt=hoy)),
+                creditos_activos=Count('id', filter=Q(is_pagado=False, fecha_vencimiento__gte=hoy)),
+            )
+            .order_by('cliente__nombre')
+        )
+
+        resultados = []
+        for item in agrupados:
+            total_dispersado = item['total_dispersado'] or 0
+            total_pagado = item['total_pagado'] or 0
+            adeudo = total_dispersado - total_pagado
+
+            nombre = (item['cliente__nombre'] or '').strip()
+            apellido_paterno = (item['cliente__apellido_paterno'] or '').strip()
+            apellido_materno = (item['cliente__apellido_materno'] or '').strip()
+            razon_social = (item['cliente__razon_social'] or '').strip()
+
+            if nombre:
+                nombre_cliente = " ".join(
+                    [part for part in [nombre, apellido_paterno, apellido_materno] if part]
+                )
+            else:
+                nombre_cliente = razon_social
+
+            if adeudo <= 0:
+                estado = 'PAGADA'
+            elif (item['creditos_vencidos'] or 0) > 0:
+                estado = 'VENCIDA'
+            else:
+                estado = 'ACTIVA'
+
+            resultados.append({
+                'cliente': {
+                    'id': item['cliente_id'],
+                    'codigo': item['cliente__codigo'],
+                    'nombre': nombre_cliente,
+                },
+                'total_creditos': item['total_creditos'] or 0,
+                'total_dispersado': float(total_dispersado),
+                'total_pagado': float(total_pagado),
+                'adeudo': float(adeudo),
+                'fecha_ultimo_credito': item['fecha_ultimo_credito'],
+                'fecha_vencimiento_proxima': item['fecha_vencimiento_proxima'],
+                'creditos_vencidos': item['creditos_vencidos'] or 0,
+                'creditos_activos': item['creditos_activos'] or 0,
+                'estado': estado,
+            })
+
+        page = self.paginate_queryset(resultados)
+        if page is not None:
+            return self.get_paginated_response(page)
+        return Response(resultados)
     
     @extend_schema(
         summary="Listar créditos de clientes",
@@ -179,6 +256,10 @@ class CreditoClienteViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, vi
         search = request.query_params.get('search')
         if search:
             queryset = self.filter_queryset(queryset)
+
+        agrupado = request.query_params.get('agrupado')
+        if agrupado and agrupado.lower() == 'true':
+            return self._agrupar_por_cliente(queryset)
         
         # Paginar y retornar
         page = self.paginate_queryset(queryset)
@@ -242,6 +323,14 @@ class CreditoClienteViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, vi
             queryset = queryset.filter(fecha__gte=dia_inicio)
         if dia_fin:
             queryset = queryset.filter(fecha__lte=dia_fin)
+
+        search = request.query_params.get('search')
+        if search:
+            queryset = self.filter_queryset(queryset)
+
+        agrupado = request.query_params.get('agrupado')
+        if agrupado and agrupado.lower() == 'true':
+            return self._agrupar_por_cliente(queryset)
         
         page = self.paginate_queryset(queryset)
         if page is not None:
@@ -287,6 +376,14 @@ class CreditoClienteViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, vi
             queryset = queryset.filter(fecha__gte=dia_inicio)
         if dia_fin:
             queryset = queryset.filter(fecha__lte=dia_fin)
+
+        search = request.query_params.get('search')
+        if search:
+            queryset = self.filter_queryset(queryset)
+
+        agrupado = request.query_params.get('agrupado')
+        if agrupado and agrupado.lower() == 'true':
+            return self._agrupar_por_cliente(queryset)
         
         page = self.paginate_queryset(queryset)
         if page is not None:
@@ -595,6 +692,63 @@ class PagosCreditoViewSet(viewsets.ModelViewSet):
     - GET /api/pagos-credito/por_cliente/{cliente_id}/ - Pagos de un cliente
     """
     permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _to_money(value, field_name='monto'):
+        try:
+            amount = Decimal(str(value)).quantize(Decimal('0.01'))
+        except (InvalidOperation, TypeError, ValueError):
+            raise ValueError(f'Valor inválido en {field_name}.')
+        if amount <= Decimal('0.00'):
+            raise ValueError(f'{field_name} debe ser mayor a cero.')
+        return amount
+
+    def _build_payment_pool(self, pagos):
+        if not isinstance(pagos, list) or not pagos:
+            raise ValueError('Debe proporcionar al menos un pago.')
+
+        pool = []
+        total = Decimal('0.00')
+        for idx, pago in enumerate(pagos, start=1):
+            if not isinstance(pago, dict):
+                raise ValueError(f'Formato inválido en pagos[{idx}].')
+
+            metodo_raw = pago.get('metodo_pago')
+            metodo_id = metodo_raw.get('id') if isinstance(metodo_raw, dict) else metodo_raw
+            metodo = MetodoPago.objects.filter(id=metodo_id).first()
+            if not metodo:
+                raise ValueError(f'Método de pago inválido en pagos[{idx}].')
+
+            monto = self._to_money(pago.get('monto'), f'pagos[{idx}].monto')
+            referencia = (pago.get('referencia') or '').strip()
+            pool.append({
+                'metodo_pago': metodo.id,
+                'referencia': referencia,
+                'restante': monto,
+            })
+            total += monto
+        return pool, total
+
+    @staticmethod
+    def _consume_pool(pool, objetivo):
+        restante = objetivo.quantize(Decimal('0.01'))
+        pagos_credito = []
+        for item in pool:
+            if restante <= Decimal('0.00'):
+                break
+            if item['restante'] <= Decimal('0.00'):
+                continue
+            usar = min(item['restante'], restante).quantize(Decimal('0.01'))
+            if usar <= Decimal('0.00'):
+                continue
+            pagos_credito.append({
+                'metodo_pago': item['metodo_pago'],
+                'monto': str(usar),
+                'referencia': item['referencia'],
+            })
+            item['restante'] = (item['restante'] - usar).quantize(Decimal('0.01'))
+            restante = (restante - usar).quantize(Decimal('0.01'))
+        return pagos_credito, restante
     
     def get_queryset(self):
         """Queryset con select_related para optimizar consultas"""
@@ -677,6 +831,111 @@ class PagosCreditoViewSet(viewsets.ModelViewSet):
     def list(self, request, *args, **kwargs):
         """Listar pagos con filtros"""
         return super().list(request, *args, **kwargs)
+
+    @action(detail=False, methods=['post'], url_path='prelacion')
+    @transaction.atomic
+    def prelacion(self, request):
+        """
+        Aplica un pago global a los créditos activos de un cliente por prelación:
+        primero al crédito más antiguo por fecha de vencimiento.
+        """
+        cliente_id = request.data.get('cliente')
+        if not cliente_id:
+            return Response(
+                {'detail': 'Debe enviar el campo cliente.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            cantidad_pagar = self._to_money(request.data.get('cantidad_pagar'), 'cantidad_pagar')
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            pool, total_pagos = self._build_payment_pool(request.data.get('pagos', []))
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        if total_pagos != cantidad_pagar:
+            return Response(
+                {
+                    'detail': (
+                        f'El total de pagos (${total_pagos}) debe coincidir '
+                        f'con cantidad_pagar (${cantidad_pagar}).'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        creditos = list(
+            CreditoCliente.objects.filter(
+                cliente_id=cliente_id,
+                is_pagado=False,
+                status_model=CreditoCliente.STATUS_MODEL_ACTIVE,
+            ).order_by('fecha_vencimiento', 'fecha', 'id')
+        )
+
+        if not creditos:
+            return Response(
+                {'detail': 'El cliente no tiene créditos activos para aplicar prelación.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        adeudo_total = sum((c.adeudo_actual() for c in creditos), Decimal('0.00')).quantize(Decimal('0.01'))
+        if cantidad_pagar > adeudo_total:
+            return Response(
+                {'detail': f'La cantidad a pagar (${cantidad_pagar}) excede el adeudo total (${adeudo_total}).'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        restante_global = cantidad_pagar
+        aplicaciones = []
+
+        for credito in creditos:
+            if restante_global <= Decimal('0.00'):
+                break
+            adeudo = credito.adeudo_actual()
+            if adeudo <= Decimal('0.00'):
+                continue
+
+            monto_aplicar = min(adeudo, restante_global).quantize(Decimal('0.01'))
+            pagos_credito, faltante = self._consume_pool(pool, monto_aplicar)
+            if faltante > Decimal('0.00'):
+                return Response(
+                    {'detail': 'No fue posible distribuir los pagos para completar la prelación.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            payload = {
+                'credito': credito.id,
+                'cantidad_pagar': str(monto_aplicar),
+                'pagos': pagos_credito,
+            }
+            serializer = PagoCreditoCreateSingularSerializer(data=payload, context={'request': request})
+            serializer.is_valid(raise_exception=True)
+            credito_actualizado = serializer.save()
+
+            aplicaciones.append({
+                'credito_id': credito_actualizado.id,
+                'fecha_vencimiento': credito_actualizado.fecha_vencimiento,
+                'monto_aplicado': float(monto_aplicar),
+                'adeudo_restante': float(credito_actualizado.adeudo_actual()),
+                'estado': credito_actualizado.estado,
+            })
+            restante_global = (restante_global - monto_aplicar).quantize(Decimal('0.01'))
+
+        return Response(
+            {
+                'detail': 'Pago aplicado por prelación correctamente.',
+                'data': {
+                    'cliente_id': int(cliente_id),
+                    'monto_aplicado': float(cantidad_pagar),
+                    'aplicaciones': aplicaciones,
+                    'total_creditos_afectados': len(aplicaciones),
+                },
+            },
+            status=status.HTTP_201_CREATED,
+        )
     
     @extend_schema(
         summary="Registrar pago de crédito",
