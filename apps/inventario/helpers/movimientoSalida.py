@@ -6,13 +6,26 @@ from django.db import transaction
 #============================= IMPORTANTE: MOVIMIENTOS DE INVENTARIO ==========================
 #                                     MOVIMENTO PRONCIPAL
 #============================= MOVIMIENTOS DE INVENTARIO ==========================
-def movimento_inventario(detalle_lotes=[], almacen_salida=None, almacen_destino=None, movimiento=MovimientoInventario.TIPO_SALIDA, sub_movimiento=MovimientoInventario.SALIDA_TRASPASO, nota="", user=None):
+def movimento_inventario(detalle_lotes=None, almacen_salida=None, almacen_destino=None, movimiento=MovimientoInventario.TIPO_SALIDA, sub_movimiento=MovimientoInventario.SALIDA_TRASPASO, nota="", user=None):
     """
     Función para manejar movimientos de inventario con corrección en la deducción de lotes
     """
 
-    # Calcular cantidad total usando sum de Django para mejor precisión
-    cantidad_total_productos = sum(Decimal(str(lote['cantidad'])) for lote in detalle_lotes)
+    if detalle_lotes is None:
+        detalle_lotes = []
+
+    # Soporta ambos formatos:
+    # 1) [{'producto':..., 'cantidad':..., 'lotes':[...]}]
+    # 2) [{'producto':..., 'lotes':[{'cantidad':...}, ...]}]
+    cantidad_total_productos = Decimal('0')
+    for detalle in detalle_lotes:
+        if detalle.get('cantidad') is not None:
+            cantidad_total_productos += Decimal(str(detalle['cantidad']))
+            continue
+
+        lotes = detalle.get('lotes') or []
+        for lote_data in lotes:
+            cantidad_total_productos += Decimal(str(lote_data.get('cantidad', 0)))
  
     
     fase = MovimientoInventario.FASE_PROCESO if sub_movimiento == MovimientoInventario.SALIDA_TRASPASO else MovimientoInventario.FASE_TERMINADA
