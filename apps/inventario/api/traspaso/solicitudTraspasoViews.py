@@ -378,6 +378,7 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
 
                 detalle_lotes.append({
                     'producto': det.producto,
+                    'cantidad': det.cantidad,
                     'lotes': lotes_asignados
                 })
 
