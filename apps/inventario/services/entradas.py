@@ -201,14 +201,25 @@ class AbastecimientoService:
             if not isinstance(cantidad, Decimal):
                 cantidad = Decimal(str(cantidad))
 
-            # Costo unitario desde CompraDetalle
-            detalle = CompraDetalle.objects.filter(
-                compra_id=compra_id,
-                producto_id=producto_id
-            ).only("precio_unitario").first()
-
-            costo_unitario = detalle.precio_unitario if detalle else Decimal("0.00")
-            item["costo_unitario"] = costo_unitario  # para tu procesar_entrada()
+            # Costo unitario:
+            # 1) Prioriza el que ya viene del item normalizado (respetando split por detalle).
+            # 2) Fallback: primer detalle de compra para compatibilidad con payloads legacy.
+            costo_unitario_item = item.get("costo_unitario")
+            if costo_unitario_item is not None:
+                if not isinstance(costo_unitario_item, Decimal):
+                    costo_unitario_item = Decimal(str(costo_unitario_item))
+                costo_unitario = costo_unitario_item.quantize(Decimal("0.01"))
+            else:
+                detalle = CompraDetalle.objects.filter(
+                    compra_id=compra_id,
+                    producto_id=producto_id
+                ).only("precio_unitario").first()
+                costo_unitario = (
+                    detalle.precio_unitario.quantize(Decimal("0.01"))
+                    if detalle and detalle.precio_unitario is not None
+                    else Decimal("0.00")
+                )
+            item["costo_unitario"] = costo_unitario
 
             costo_total_item = cantidad * costo_unitario
 
