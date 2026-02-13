@@ -2,6 +2,7 @@ from django.db import transaction, DatabaseError
 from django.utils import timezone
 from datetime import timedelta 
 from decimal import Decimal
+from collections import defaultdict
 
 from apps.erp.models import Compra, CompraDetalle, OrdenCompra, Almacen, incidencia as IncidenciaModel, IncidenciaLote, Producto
 from apps.inventario.models import LoteInventario, MovimientoInventario, ProductosMovimiento
@@ -342,13 +343,12 @@ class AbastecimientoService:
 
         compra = Compra.objects.select_for_update().get(id=compra_id)
         detalles_qs = CompraDetalle.objects.select_for_update().filter(compra_id=compra_id)
-        detalles_por_producto = {d.producto_id: d for d in detalles_qs}
+        detalles_por_producto = defaultdict(list)
+        for detalle in detalles_qs:
+            detalles_por_producto[detalle.producto_id].append(detalle)
 
-        productos_recibidos = set()
-        productos_incidencias = []
-        existe_diferencia = False
-        items_normalizados = []
-
+        # Consolidar items recibidos por producto para evitar dobles entradas
+        recibidos_por_producto = {}
         for producto_item in items:
             producto_value = producto_item.get('producto')
             if isinstance(producto_value, Producto):
@@ -357,8 +357,6 @@ class AbastecimientoService:
                 producto = Producto.objects.filter(id=producto_value).first()
                 if not producto:
                     continue
-
-            productos_recibidos.add(producto.id)
 
             cantidad_recibida = producto_item.get('cantidad', decimal_zero)
             if not isinstance(cantidad_recibida, Decimal):
@@ -370,17 +368,43 @@ class AbastecimientoService:
                 costo_unitario = Decimal(str(costo_unitario))
             costo_unitario = costo_unitario.quantize(Decimal('0.01'))
 
-            detalle = detalles_por_producto.get(producto.id)
-            cantidad_aceptada = cantidad_recibida
+            data = recibidos_por_producto.get(producto.id)
+            if not data:
+                data = {
+                    'producto': producto,
+                    'cantidad_recibida': decimal_zero,
+                    'item_base': dict(producto_item),
+                    'costo_unitario': costo_unitario,
+                }
+                recibidos_por_producto[producto.id] = data
 
-            if not detalle:
+            data['cantidad_recibida'] = (
+                data['cantidad_recibida'] + cantidad_recibida
+            ).quantize(Decimal('0.001'))
+            # Tomar el ultimo costo explícito si llega en payload
+            data['costo_unitario'] = costo_unitario
+
+        productos_recibidos = set(recibidos_por_producto.keys())
+        productos_incidencias = []
+        existe_diferencia = False
+        items_normalizados = []
+
+        for producto_id, data_recibida in recibidos_por_producto.items():
+            producto = data_recibida['producto']
+            cantidad_recibida = data_recibida['cantidad_recibida']
+            producto_item_base = data_recibida['item_base']
+            costo_unitario_payload = data_recibida['costo_unitario']
+
+            detalles_producto = detalles_por_producto.get(producto.id, [])
+
+            if not detalles_producto:
                 # Producto no solicitado: no impacta CEDIS y va directo a incidencia.
                 existe_diferencia = True
                 CompraDetalle.objects.create(
                     compra_id=compra_id,
                     producto=producto,
                     cantidad=cantidad_recibida,
-                    precio_unitario=costo_unitario,
+                    precio_unitario=costo_unitario_payload,
                     existe_diferencia=True,
                     es_producto_nuevo=True,
                     cantidad_entrada=decimal_zero,
@@ -389,81 +413,108 @@ class AbastecimientoService:
                     'producto': producto,
                     'cantidad': cantidad_recibida,
                     'afectar_inventario': True,
-                    'costo_unitario': costo_unitario,
+                    'costo_unitario': costo_unitario_payload,
                     'nota': 'Producto adicional no solicitado en la compra.',
                     'descripcion': f"Producto adicional no solicitado en compra {compra.codigo}: {producto.codigo or producto.nombre}",
                 })
                 continue
 
-            cantidad_esperada = detalle.cantidad
-            if not isinstance(cantidad_esperada, Decimal):
-                cantidad_esperada = Decimal(str(cantidad_esperada))
-            cantidad_esperada = cantidad_esperada.quantize(Decimal('0.001'))
+            # Sumar total esperado por producto (soporta detalles repetidos del mismo producto)
+            cantidad_esperada = sum(
+                (
+                    detalle.cantidad
+                    if isinstance(detalle.cantidad, Decimal)
+                    else Decimal(str(detalle.cantidad))
+                ).quantize(Decimal('0.001'))
+                for detalle in detalles_producto
+            ).quantize(Decimal('0.001'))
+
+            cantidad_aceptada_total = min(cantidad_recibida, cantidad_esperada).quantize(Decimal('0.001'))
+            hay_diferencia = cantidad_recibida != cantidad_esperada
 
             if cantidad_recibida > cantidad_esperada:
                 # No se acepta más de lo solicitado; excedente se manda a incidencias.
                 existe_diferencia = True
-                detalle.existe_diferencia = True
-                cantidad_aceptada = cantidad_esperada
                 excedente = (cantidad_recibida - cantidad_esperada).quantize(Decimal('0.001'))
                 productos_incidencias.append({
                     'producto': producto,
                     'cantidad': excedente,
                     'afectar_inventario': True,
-                    'costo_unitario': costo_unitario,
+                    'costo_unitario': costo_unitario_payload,
                     'nota': 'Excedente recibido respecto a la cantidad solicitada.',
                     'descripcion': f"Excedente en recepción de compra {compra.codigo} para {producto.codigo or producto.nombre}",
                 })
             elif cantidad_recibida < cantidad_esperada:
                 existe_diferencia = True
-                detalle.existe_diferencia = True
                 faltante = (cantidad_esperada - cantidad_recibida).quantize(Decimal('0.001'))
                 productos_incidencias.append({
                     'producto': producto,
                     'cantidad': faltante,
                     'afectar_inventario': True,
-                    'costo_unitario': costo_unitario,
+                    'costo_unitario': costo_unitario_payload,
                     'nota': 'Faltante detectado en recepción de compra.',
                     'descripcion': f"Faltante en recepción de compra {compra.codigo} para {producto.codigo or producto.nombre}",
                 })
-            else:
-                detalle.existe_diferencia = False
+            
+            # Distribuir cantidad aceptada por cada detalle para mantener trazabilidad
+            restante_aceptada = cantidad_aceptada_total
+            for detalle in sorted(detalles_producto, key=lambda d: d.id):
+                cantidad_detalle = (
+                    detalle.cantidad
+                    if isinstance(detalle.cantidad, Decimal)
+                    else Decimal(str(detalle.cantidad))
+                ).quantize(Decimal('0.001'))
 
-            detalle.cantidad_entrada = cantidad_aceptada
-            detalle.save(update_fields=['existe_diferencia', 'cantidad_entrada'])
+                cantidad_entrada_detalle = min(restante_aceptada, cantidad_detalle).quantize(Decimal('0.001'))
+                detalle.existe_diferencia = hay_diferencia
+                detalle.cantidad_entrada = cantidad_entrada_detalle
+                detalle.save(update_fields=['existe_diferencia', 'cantidad_entrada'])
 
-            if cantidad_aceptada > decimal_zero:
-                item_normalizado = dict(producto_item)
-                item_normalizado['producto'] = producto
-                item_normalizado['cantidad'] = cantidad_aceptada
-                item_normalizado['costo_unitario'] = costo_unitario
-                items_normalizados.append(item_normalizado)
+                if cantidad_entrada_detalle > decimal_zero:
+                    item_normalizado = dict(producto_item_base)
+                    item_normalizado['producto'] = producto
+                    item_normalizado['cantidad'] = cantidad_entrada_detalle
+                    # Respetar costo del detalle para casos de mismo producto con distinto precio
+                    costo_detalle = detalle.precio_unitario
+                    if not isinstance(costo_detalle, Decimal):
+                        costo_detalle = Decimal(str(costo_detalle))
+                    item_normalizado['costo_unitario'] = costo_detalle.quantize(Decimal('0.01'))
+                    items_normalizados.append(item_normalizado)
+
+                restante_aceptada = (restante_aceptada - cantidad_entrada_detalle).quantize(Decimal('0.001'))
+                if restante_aceptada <= decimal_zero:
+                    restante_aceptada = decimal_zero
 
         # Productos de la compra que no vinieron en el payload => recibidos como 0.
-        for producto_id, detalle in detalles_por_producto.items():
+        for producto_id, detalles_producto in detalles_por_producto.items():
             if producto_id in productos_recibidos:
                 continue
 
-            cantidad_esperada = detalle.cantidad
-            if not isinstance(cantidad_esperada, Decimal):
-                cantidad_esperada = Decimal(str(cantidad_esperada))
-            cantidad_esperada = cantidad_esperada.quantize(Decimal('0.001'))
+            cantidad_esperada = sum(
+                (
+                    detalle.cantidad
+                    if isinstance(detalle.cantidad, Decimal)
+                    else Decimal(str(detalle.cantidad))
+                ).quantize(Decimal('0.001'))
+                for detalle in detalles_producto
+            ).quantize(Decimal('0.001'))
 
             if cantidad_esperada <= decimal_zero:
                 continue
 
             existe_diferencia = True
-            detalle.existe_diferencia = True
-            detalle.cantidad_entrada = decimal_zero
-            detalle.save(update_fields=['existe_diferencia', 'cantidad_entrada'])
+            for detalle in detalles_producto:
+                detalle.existe_diferencia = True
+                detalle.cantidad_entrada = decimal_zero
+                detalle.save(update_fields=['existe_diferencia', 'cantidad_entrada'])
 
             productos_incidencias.append({
-                'producto': detalle.producto,
+                'producto': detalles_producto[0].producto,
                 'cantidad': cantidad_esperada,
                 'afectar_inventario': True,
-                'costo_unitario': detalle.precio_unitario,
+                'costo_unitario': detalles_producto[0].precio_unitario,
                 'nota': 'Producto no recibido durante la entrada.',
-                'descripcion': f"Producto no recibido en compra {compra.codigo}: {detalle.producto.codigo or detalle.producto.nombre}",
+                'descripcion': f"Producto no recibido en compra {compra.codigo}: {detalles_producto[0].producto.codigo or detalles_producto[0].producto.nombre}",
             })
 
         compra.existe_diferencia = existe_diferencia

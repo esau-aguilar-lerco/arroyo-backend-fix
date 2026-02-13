@@ -86,7 +86,7 @@ class PagoCreditoProveedorCreateSingularSerializer(serializers.Serializer):
         max_digits=20,
         decimal_places=4,
         required=True,
-        help_text="Monto total a pagar al crédito (puede ser menor al total de pagos si hay cambio)"
+        help_text="Monto total a pagar al crédito. Debe coincidir con la suma de los pagos enviados."
     )
     
     pagos = MetodoPagoCajaAperturaSerializer(many=True, required=True)
@@ -103,7 +103,8 @@ class PagoCreditoProveedorCreateSingularSerializer(serializers.Serializer):
         """Validaciones globales"""
         credito = attrs['credito']
         pagos = attrs['pagos']
-        cantidad_pagar = attrs['cantidad_pagar']
+        cantidad_pagar = Decimal(str(attrs['cantidad_pagar'])).quantize(Decimal('0.01'))
+        attrs['cantidad_pagar'] = cantidad_pagar
         
         # Obtener usuario del contexto
         request = self.context.get('request')
@@ -127,12 +128,17 @@ class PagoCreditoProveedorCreateSingularSerializer(serializers.Serializer):
             })
         
         # Calcular total de pagos
-        total_pagos = sum(Decimal(str(pago['monto'])) for pago in pagos)
+        total_pagos = sum(Decimal(str(pago['monto'])) for pago in pagos).quantize(Decimal('0.01'))
+        attrs['_total_pagos'] = total_pagos
         
-        # Validar que el total de pagos sea suficiente
-        if total_pagos < cantidad_pagar:
+        # Para pago a proveedor no se maneja "cambio":
+        # el total pagado por metodos debe coincidir exactamente.
+        if total_pagos != cantidad_pagar:
             raise serializers.ValidationError({
-                'pagos': f"El total de los pagos (${total_pagos}) es menor a la cantidad a pagar (${cantidad_pagar})."
+                'pagos': (
+                    f"El total de pagos (${total_pagos}) debe coincidir "
+                    f"con la cantidad a pagar (${cantidad_pagar})."
+                )
             })
         
         # Validar montos individuales
@@ -152,8 +158,7 @@ class PagoCreditoProveedorCreateSingularSerializer(serializers.Serializer):
         
         1. Registra cada pago en PagosCreditoProveedor
         2. NO registra transacciones en caja (pago a proveedor es independiente de caja)
-        3. Calcula cambio si total de pagos > cantidad_pagar con EFECTIVO
-        4. Actualiza el monto_pagado del crédito con cantidad_pagar
+        3. Actualiza el monto_pagado del crédito con cantidad_pagar
         5. Marca como pagado si se liquidó completamente
         """
         credito = validated_data['credito']
@@ -161,25 +166,11 @@ class PagoCreditoProveedorCreateSingularSerializer(serializers.Serializer):
         usuario = validated_data['usuario']
         cantidad_pagar = validated_data['cantidad_pagar']
         
-        # Calcular total de los pagos
-        total_pagos = sum(Decimal(str(pago['monto'])) for pago in pagos)
+        total_pagos = validated_data.get('_total_pagos')
+        if total_pagos is None:
+            total_pagos = sum(Decimal(str(pago['monto'])) for pago in pagos).quantize(Decimal('0.01'))
         
-        # Determinar si hay cambio
-        cambio = Decimal('0')
-        metodo_efectivo = None
-        
-        # Buscar si hay pago en EFECTIVO
-        for pago in pagos:
-            metodo_pago = pago['metodo_pago']
-            if metodo_pago.nombre == 'EFECTIVO':
-                metodo_efectivo = metodo_pago
-                break
-        
-        # Si el total excede la cantidad a pagar y hay EFECTIVO, calcular cambio
-        if total_pagos > cantidad_pagar and metodo_efectivo:
-            cambio = total_pagos - cantidad_pagar
-        
-        # Registrar cada pago (sin ajustar por cambio, se registra el monto completo)
+        # Registrar cada pago
         pagos_registrados = []
         for pago_data in pagos:
             metodo_pago = pago_data['metodo_pago']
@@ -196,17 +187,21 @@ class PagoCreditoProveedorCreateSingularSerializer(serializers.Serializer):
             )
             pagos_registrados.append(pago_obj)
         
-        # Actualizar el crédito con la cantidad_pagar (no con el total de pagos)
-        credito.monto_pagado = Decimal(str(credito.monto_pagado)) + cantidad_pagar
+        # Actualizar el crédito con la cantidad pagada normalizada a 2 decimales
+        monto_pagado_actual = Decimal(str(credito.monto_pagado or 0)).quantize(Decimal('0.01'))
+        monto_credito_total = Decimal(str(credito.monto or 0)).quantize(Decimal('0.01'))
+        credito.monto_pagado = (monto_pagado_actual + cantidad_pagar).quantize(Decimal('0.01'))
+        if credito.monto_pagado > monto_credito_total:
+            credito.monto_pagado = monto_credito_total
         credito.actualizar_saldo_proveedor_pago(cantidad_pagar)
-        credito.save()
+        credito.save(update_fields=['monto_pagado', 'updated_at'])
         
         # Verificar si se liquidó completamente
-        if credito.adeudo_actual() == 0:
+        if credito.adeudo_actual() <= Decimal('0.00'):
             credito.marcar_pagado()
-        
-        # Retornar información del cambio junto con el crédito
-        credito.cambio_calculado = float(cambio) if cambio > 0 else None
+            
+        # Exponer total aplicado para facilitar auditoria en el front
+        credito.total_pagos_aplicados = float(total_pagos)
         
         return credito
 
