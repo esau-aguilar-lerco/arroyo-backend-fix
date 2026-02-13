@@ -663,7 +663,7 @@ class CreditoProveedorViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, 
                 'creditos_vencidos': stats['vencidos'] or 0,
                 'promedio_credito': float(promedio_credito)
             },
-            #'creditos': creditos_data
+            'creditos': creditos_data
         })
 
 
