@@ -168,16 +168,28 @@ class VentaViewSet(viewsets.ModelViewSet):
                 
         # Filtro de is_terminada
         is_terminada = request.query_params.get('is_terminada', None)
+        is_terminada_bool = None
         if is_terminada is not None:
             if is_terminada.lower() in ['true', '1']:
+                is_terminada_bool = True
                 queryset = queryset.filter(ya_terminada=True)
             elif is_terminada.lower() in ['false', '0']:
+                is_terminada_bool = False
                 queryset = queryset.filter(ya_terminada=False)
 
         # Filtros adicionales
         fase = request.query_params.get('fase', None)
         if fase:
-            queryset = queryset.filter(fase=fase)
+            # Compatibilidad para panel de comandera:
+            # cuando se solicita "VENTA COMANDERA" terminada, realmente debe traer
+            # ventas tipo COMANDERA que ya pasaron a fase TERMINADA.
+            if fase == Venta.FASE_VENTA_COMANDA and is_terminada_bool is True:
+                queryset = queryset.filter(
+                    tipo_venta=Venta.COMANDERA,
+                    fase__in=[Venta.FASE_VENTA_COMANDA, Venta.FASE_TERMINADA]
+                )
+            else:
+                queryset = queryset.filter(fase=fase)
         
         cliente_id = request.query_params.get('cliente', None)
         if cliente_id:
