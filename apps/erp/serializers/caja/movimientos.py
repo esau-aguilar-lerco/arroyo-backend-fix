@@ -305,6 +305,8 @@ class MovimientoCajaVentaSerializer(serializers.Serializer):
             #  Si ya no hay adeudo, marcar como terminada
             #if float(venta.adeudo()) <= 0.0:
             #    venta.fase = Venta.FASE_TERMINADA
+            if venta.fase == Venta.FASE_VENTA_COMANDA and float(venta.adeudo()) <= 0.0:
+                venta.fase = Venta.FASE_TERMINADA
 
             # Recalcular condición de pago según métodos usados
             pagos_actuales = list(venta.pagos.all())
