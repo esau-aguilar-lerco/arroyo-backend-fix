@@ -168,9 +168,10 @@ class PagoCreditoUpdateSerializer(serializers.Serializer):
     luego crea los nuevos pagos.
     """
     credito = FlexiblePKRelatedField(
-        queryset=CreditoCliente.objects.filter(is_pagado=False),
-        help_text="ID del crédito o dic {id: <id>}",
-        required=True
+        queryset=CreditoCliente.objects.all(),
+        help_text="ID del crédito o dic {id: <id>} (opcional, se infiere desde pago_id)",
+        required=False,
+        allow_null=True
     )
     cantidad_pagar = serializers.DecimalField(
         max_digits=12, 
@@ -183,9 +184,13 @@ class PagoCreditoUpdateSerializer(serializers.Serializer):
         help_text="Lista de nuevos pagos a registrar en el crédito",
         required=True
     )
-    pago_anterior_id = serializers.IntegerField(
+    pago_id = serializers.IntegerField(
         help_text="ID del pago anterior a eliminar/actualizar",
-        required=True
+        required=False
+    )
+    pago_anterior_id = serializers.IntegerField(
+        help_text="Alias legacy de pago_id",
+        required=False
     )
     
     def validate_pagos(self, value):
@@ -194,10 +199,10 @@ class PagoCreditoUpdateSerializer(serializers.Serializer):
             raise serializers.ValidationError("Debe proporcionar al menos un método de pago.")
         return value
     
-    def validate_pago_anterior_id(self, value):
+    def validate_pago_id(self, value):
         """Validar que el pago anterior exista"""
         try:
-            pago = PagosCredito.objects.get(id=value)
+            PagosCredito.objects.get(id=value)
         except PagosCredito.DoesNotExist:
             raise serializers.ValidationError("El pago especificado no existe.")
         return value
@@ -208,21 +213,28 @@ class PagoCreditoUpdateSerializer(serializers.Serializer):
             raise serializers.ValidationError("No se pudo identificar al usuario.")
         usuario = request.user
         
-        credito = attrs['credito']
+        credito = attrs.get('credito')
         pagos = attrs['pagos']
-        pago_anterior_id = attrs['pago_anterior_id']
-        
+        pago_id = attrs.get('pago_id') or attrs.get('pago_anterior_id')
+        if not pago_id:
+            raise serializers.ValidationError(
+                "Debe proporcionar pago_id (o pago_anterior_id para compatibilidad)."
+            )
+
         # Obtener pago anterior
         try:
-            pago_anterior = PagosCredito.objects.get(id=pago_anterior_id)
+            pago_anterior = PagosCredito.objects.select_related('credito').get(id=pago_id)
         except PagosCredito.DoesNotExist:
             raise serializers.ValidationError("El pago anterior no existe.")
-        
-        # Validar que el pago pertenezca al crédito
-        if pago_anterior.credito_id != credito.id:
+
+        # Si no envían crédito, se infiere del pago
+        if credito is None:
+            credito = pago_anterior.credito
+        elif pago_anterior.credito_id != credito.id:
             raise serializers.ValidationError(
                 "El pago especificado no pertenece al crédito indicado."
             )
+        attrs['credito'] = credito
         
         # Validar que el usuario tenga una caja abierta
         caja_apertura = usuario.get_mi_caja()
@@ -233,10 +245,10 @@ class PagoCreditoUpdateSerializer(serializers.Serializer):
             )
         
         # Calcular el adeudo considerando que se va a revertir el pago anterior
-        monto_pago_anterior = float(pago_anterior.monto)
+        monto_pago_anterior = Decimal(str(pago_anterior.monto))
         adeudo_sin_pago_anterior = credito.adeudo_actual() + monto_pago_anterior
-        
-        if float(attrs['cantidad_pagar']) > adeudo_sin_pago_anterior:
+
+        if Decimal(str(attrs['cantidad_pagar'])) > adeudo_sin_pago_anterior:
             raise serializers.ValidationError(
                 f'La cantidad a pagar (${attrs["cantidad_pagar"]:.2f}) excede el adeudo disponible (${adeudo_sin_pago_anterior:.2f}).'
             )
@@ -267,8 +279,8 @@ class PagoCreditoUpdateSerializer(serializers.Serializer):
         monto_pago_anterior = validated_data['_monto_pago_anterior']
         
         # 1. Revertir el pago anterior en el crédito
-        credito.monto_pagado -= Decimal(str(monto_pago_anterior))
-        credito.cliente.total_credito = float(credito.cliente.total_credito) - monto_pago_anterior
+        credito.monto_pagado -= monto_pago_anterior
+        credito.cliente.total_credito = Decimal(str(credito.cliente.total_credito or 0)) - monto_pago_anterior
         credito.cliente.save(update_fields=["total_credito"])
         
         # 2. Si el crédito estaba pagado, reactivarlo
