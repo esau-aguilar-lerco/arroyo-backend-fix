@@ -345,19 +345,22 @@ class ProductosMovimiento(BaseModel):
 
 
 class EmbarqueReparto(BaseModel):
-    FASE_CARGA = 'CARGA'
+    FASE_PROGRAMADO = 'PROGRAMADO'
+    # Alias para mantener compatibilidad con código que aún usa FASE_CARGA.
+    FASE_CARGA = FASE_PROGRAMADO
+    FASE_CARGA_LEGACY = 'CARGA'
     FASE_REPARTO = 'REPARTO'
     FASE_TERMINADO = 'TERMINADO'
     FASE_CANCELADO = 'CANCELADO'
     FASES = [
-        (FASE_CARGA, FASE_CARGA),
+        (FASE_PROGRAMADO, FASE_PROGRAMADO),
         (FASE_REPARTO, FASE_REPARTO),
         (FASE_TERMINADO, FASE_TERMINADO),
         (FASE_CANCELADO, FASE_CANCELADO),
     ]
     ruta = models.ForeignKey(Rutas, on_delete=models.CASCADE, related_name='embarques')
     encargado = models.ForeignKey(Usuario, on_delete=models.SET_NULL, null=True, blank=True, related_name='embarques_usuario')
-    fase = models.CharField(max_length=20, choices=FASES, default=FASE_CARGA)
+    fase = models.CharField(max_length=20, choices=FASES, default=FASE_PROGRAMADO)
     ventas = models.ManyToManyField('erp.Venta', related_name='embarques_ruta')
     movimiento_inventario_pedidos_entrada = models.ForeignKey(MovimientoInventario, on_delete=models.SET_NULL, null=True, blank=True, related_name='embarques_reparto_entrada')
     movimiento_inventario_pedidos_salida = models.ForeignKey(MovimientoInventario, on_delete=models.SET_NULL, null=True, blank=True, related_name='embarques_reparto_salida')
@@ -367,6 +370,10 @@ class EmbarqueReparto(BaseModel):
     fecha_salida = models.DateTimeField(null=True, blank=True)
     fecha_finalizada = models.DateTimeField(null=True, blank=True)
     apertura_caja = models.ForeignKey('erp.CajaApertura', on_delete=models.SET_NULL, null=True, blank=True, related_name='caja_embarque_reparto')
+
+    @classmethod
+    def fases_programado_compat(cls):
+        return [cls.FASE_PROGRAMADO, cls.FASE_CARGA_LEGACY]
     
     def add_fechas(self):
         if self.fase == self.FASE_REPARTO:
