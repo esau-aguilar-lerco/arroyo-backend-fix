@@ -175,7 +175,7 @@ class VentaMiniSerializer(BaseSerializer):
     ruta_nombre = serializers.SerializerMethodField()
     total_detalles = serializers.IntegerField(source='detalles.count', read_only=True)
     origen = serializers.CharField(source='almacen.nombre', read_only=True)
-    is_terminada = serializers.BooleanField(read_only=True)
+    is_terminada = serializers.BooleanField(source='ya_terminada', read_only=True)
     condicion_pago = serializers.CharField(read_only=True)
 
     class Meta:
@@ -356,8 +356,9 @@ class VentaSerializer(BaseSerializer):
         detalles_data = validated_data.pop('detalles', [])
         pagos_data = validated_data.pop('pagos', [])  
         vendedor = validated_data.get('vendedor', None)
-        if validated_data.get('fase') in [Venta.FASE_VENTA_COMANDA, Venta.FASE_TERMINADA]:
-            almacen = request.user.almacen
+        almacen = validated_data.get('almacen')
+        if validated_data.get('fase') in [Venta.FASE_VENTA_COMANDA, Venta.FASE_TERMINADA] and not almacen:
+            almacen = getattr(request.user, 'almacen', None) if request else None
             if not almacen:
                 almacen = vendedor.almacen if vendedor and vendedor.almacen else None
                 
