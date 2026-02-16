@@ -232,13 +232,13 @@ def listar_preventas_con_detalles_carga(request):
     Si solo_productos=true, devuelve solo los productos agrupados con cantidades sumadas.
     """
     try:
-        from apps.inventario.models import LoteInventario
+        from apps.inventario.models import LoteInventario, EmbarqueReparto
         
         # Obtener parámetros de filtro
         ruta_id = request.query_params.get('ruta_id')
         fase = request.query_params.get('fase', Venta.FASE_PRE_VENTA)
         fase_normalizada = (fase or '').strip().upper()
-        if fase_normalizada == 'PROGRAMADO':
+        if fase_normalizada in ['PROGRAMADO', EmbarqueReparto.FASE_CARGA_LEGACY]:
             fase = Venta.FASE_PRE_VENTA
         solo_productos = request.query_params.get('solo_productos', '').lower() == 'true'
         user = request.user
@@ -456,7 +456,7 @@ class EmbarqueRepartoListRetrieveAPIView(APIView):
                 name='fase',
                 type=OpenApiTypes.STR,
                 location=OpenApiParameter.QUERY,
-                description='Filtrar por fase (CARGA, REPARTO, TERMINADO, CANCELADO)',
+                description='Filtrar por fase (PROGRAMADO, REPARTO, TERMINADO, CANCELADO). CARGA se acepta como alias legacy.',
                 required=False
             ),
             OpenApiParameter(
@@ -542,17 +542,22 @@ class EmbarqueRepartoListRetrieveAPIView(APIView):
         if fase:
             from django.db.models import Max
             fase_normalizada = (fase or '').strip().upper()
+            if fase_normalizada == EmbarqueReparto.FASE_CARGA_LEGACY:
+                fase_normalizada = EmbarqueReparto.FASE_PROGRAMADO
 
             # Compatibilidad para Lista de Embarque del front actual:
-            # cuando envía fase=CARGA en modo sin paginación, también se
+            # cuando envía fase=PROGRAMADO (o legacy CARGA) en modo sin paginación, también se
             # incluyen rutas ya en REPARTO y se devuelve el embarque más reciente por ruta.
             if (
                 sin_paginacion
                 and not ruta_id
-                and fase_normalizada == EmbarqueReparto.FASE_CARGA
+                and fase_normalizada == EmbarqueReparto.FASE_PROGRAMADO
             ):
                 queryset = queryset.filter(
-                    fase__in=[EmbarqueReparto.FASE_CARGA, EmbarqueReparto.FASE_REPARTO]
+                    fase__in=[
+                        *EmbarqueReparto.fases_programado_compat(),
+                        EmbarqueReparto.FASE_REPARTO,
+                    ]
                 )
                 latest_ids = (
                     queryset.values('ruta_id')
@@ -562,9 +567,21 @@ class EmbarqueRepartoListRetrieveAPIView(APIView):
                 queryset = queryset.filter(id__in=latest_ids)
             elif ',' in fase_normalizada:
                 fases = [f.strip().upper() for f in fase_normalizada.split(',') if f.strip()]
-                queryset = queryset.filter(fase__in=fases)
+                fases_normalizadas = []
+                for fase_item in fases:
+                    if fase_item == EmbarqueReparto.FASE_CARGA_LEGACY:
+                        fase_item = EmbarqueReparto.FASE_PROGRAMADO
+                    fases_normalizadas.append(fase_item)
+
+                if EmbarqueReparto.FASE_PROGRAMADO in fases_normalizadas:
+                    fases_normalizadas.extend(EmbarqueReparto.fases_programado_compat())
+
+                queryset = queryset.filter(fase__in=list(dict.fromkeys(fases_normalizadas)))
             else:
-                queryset = queryset.filter(fase=fase_normalizada)
+                if fase_normalizada == EmbarqueReparto.FASE_PROGRAMADO:
+                    queryset = queryset.filter(fase__in=EmbarqueReparto.fases_programado_compat())
+                else:
+                    queryset = queryset.filter(fase=fase_normalizada)
 
         if encargado_id:
             queryset = queryset.filter(encargado_id=encargado_id)
@@ -706,10 +723,10 @@ def iniciar_reparto(request):
             status_model=BaseModel.STATUS_MODEL_ACTIVE
         )
         
-        # Validar que el embarque esté en fase CARGA
-        if embarque.fase != EmbarqueReparto.FASE_CARGA:
+        # Validar que el embarque esté en fase PROGRAMADO (legacy CARGA).
+        if embarque.fase not in EmbarqueReparto.fases_programado_compat():
             return Response(
-                {'detail': f'El embarque debe estar en fase CARGA para iniciar reparto. Fase actual: {embarque.fase}'},
+                {'detail': f'El embarque debe estar en fase PROGRAMADO para iniciar reparto. Fase actual: {embarque.fase}'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -868,10 +885,10 @@ def checkin_producto_embarque(request):
             ventas_data = serializer.validated_data.get('ventas', [])
             productos_tara = serializer.validated_data.get('productos_tara', [])
             
-            # Validar que el embarque esté en fase CARGA o REPARTO
-            if embarque.fase not in [EmbarqueReparto.FASE_CARGA,]:
+            # Validar que el embarque esté en fase PROGRAMADO (legacy CARGA).
+            if embarque.fase not in EmbarqueReparto.fases_programado_compat():
                 return Response(
-                    {'detail': f'El embarque debe estar en fase CARGA . Fase actual: {embarque.fase}'},
+                    {'detail': f'El embarque debe estar en fase PROGRAMADO. Fase actual: {embarque.fase}'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
                 
