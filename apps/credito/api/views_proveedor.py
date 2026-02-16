@@ -29,6 +29,8 @@ from apps.credito.serializers.credito_proveedor import (
     PagosCreditoProveedorSerializer,
     PagoCreditoProveedorCreateSingularSerializer,
     PagoCreditoProveedorCreateMasivoSerializer,
+    PagoCreditoProveedorUpdateSerializer,
+    PagoCreditoProveedorCancelarSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -914,6 +916,66 @@ class PagosCreditoProveedorViewSet(viewsets.ModelViewSet):
                 'detail': str(e),
                 'error_code': 'ERROR_REGISTRO_PAGO_PROVEEDOR'
             }, status=status.HTTP_400_BAD_REQUEST)
+
+    @extend_schema(
+        summary="Editar abono de crédito proveedor",
+        request=PagoCreditoProveedorUpdateSerializer,
+        responses={
+            200: CreditoProveedorListSerializer,
+            400: OpenApiResponse(description='Error de validación')
+        },
+        tags=['Pagos Crédito Proveedor']
+    )
+    @action(detail=False, methods=['put'], url_path='editar-abono')
+    def editar_abono(self, request):
+        serializer = PagoCreditoProveedorUpdateSerializer(
+            data=request.data,
+            context={'request': request}
+        )
+        try:
+            serializer.is_valid(raise_exception=True)
+            credito = serializer.update(None, serializer.validated_data)
+            credito_serializer = CreditoProveedorListSerializer(credito)
+            return Response(
+                {
+                    'detail': 'Abono actualizado exitosamente.',
+                    'data': credito_serializer.data
+                },
+                status=status.HTTP_200_OK
+            )
+        except Exception as e:
+            return Response(
+                {
+                    'detail': str(e),
+                    'error_code': 'ERROR_EDITAR_ABONO_PROVEEDOR'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    @extend_schema(
+        summary="Cancelar abono de crédito proveedor",
+        request=PagoCreditoProveedorCancelarSerializer,
+        responses={
+            200: OpenApiResponse(description='Abono cancelado exitosamente'),
+            400: OpenApiResponse(description='Error de validación')
+        },
+        tags=['Pagos Crédito Proveedor']
+    )
+    @action(detail=False, methods=['post'], url_path='cancelar-abono')
+    def cancelar_abono(self, request):
+        serializer = PagoCreditoProveedorCancelarSerializer(
+            data=request.data,
+            context={'request': request}
+        )
+        serializer.is_valid(raise_exception=True)
+        resultado = serializer.save()
+        return Response(
+            {
+                'detail': 'Abono cancelado exitosamente.',
+                'data': resultado
+            },
+            status=status.HTTP_200_OK
+        )
 
     @action(detail=False, methods=['post'], url_path='prelacion')
     def prelacion(self, request):

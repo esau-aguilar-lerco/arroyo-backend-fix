@@ -102,17 +102,43 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
         Devuelve un dict {detalle_id: cantidad_abastecida} con fallback a cantidad solicitada.
         Soporta identificar por detalle_id o producto.
         """
+        detalles_qs = solicitud.detalles.select_related('producto').all()
+        detalles_ids_validos = {d.id for d in detalles_qs}
+        productos_ids_validos = {d.producto_id for d in detalles_qs if d.producto_id}
+
         por_detalle = {}
         por_producto = {}
         for item in (detalles_payload or []):
             cantidad = self._q3(item.get('cantidad_abastecida', 0))
             if item.get('detalle_id') is not None:
-                por_detalle[int(item['detalle_id'])] = cantidad
+                detalle_id = int(item['detalle_id'])
+                if detalle_id not in detalles_ids_validos:
+                    raise ValidationError({
+                        "success": False,
+                        "message": "Detalle de solicitud inválido para esta operación",
+                        "errors": {
+                            "detail": (
+                                f"El detalle_id={detalle_id} no pertenece a la solicitud {solicitud.id}."
+                            )
+                        }
+                    })
+                por_detalle[detalle_id] = cantidad
             elif item.get('producto') is not None:
-                por_producto[int(item['producto'])] = cantidad
+                producto_id = int(item['producto'])
+                if producto_id not in productos_ids_validos:
+                    raise ValidationError({
+                        "success": False,
+                        "message": "Producto inválido para esta solicitud",
+                        "errors": {
+                            "detail": (
+                                f"El producto={producto_id} no pertenece a la solicitud {solicitud.id}."
+                            )
+                        }
+                    })
+                por_producto[producto_id] = cantidad
 
         resultado = {}
-        for det in solicitud.detalles.all():
+        for det in detalles_qs:
             if det.id in por_detalle:
                 resultado[det.id] = por_detalle[det.id]
             elif det.producto_id in por_producto:
