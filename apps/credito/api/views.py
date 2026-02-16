@@ -7,7 +7,7 @@ from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Q, Sum, Count, Max, Min
 from django.utils import timezone
 from datetime import timedelta
@@ -977,18 +977,23 @@ class PagosCreditoViewSet(viewsets.ModelViewSet):
             )
 
         with transaction.atomic():
-            operacion = (
-                OperacionPrelacionPago.objects.select_for_update()
-                .filter(
+            try:
+                operacion = OperacionPrelacionPago.objects.create(
+                    tipo=OperacionPrelacionPago.TIPO_CLIENTE,
+                    entidad_id=cliente_id_int,
+                    idempotency_key=idempotency_key,
+                    request_hash=request_hash,
+                    estado=OperacionPrelacionPago.ESTADO_IN_PROGRESS,
+                    created_by=request.user,
+                )
+            except IntegrityError:
+                operacion = OperacionPrelacionPago.objects.select_for_update().get(
                     tipo=OperacionPrelacionPago.TIPO_CLIENTE,
                     entidad_id=cliente_id_int,
                     idempotency_key=idempotency_key,
                     status_model=OperacionPrelacionPago.STATUS_MODEL_ACTIVE,
                 )
-                .first()
-            )
 
-            if operacion:
                 if operacion.request_hash != request_hash:
                     detail = (
                         'Idempotency-Key ya fue usado con otro payload '
@@ -1005,6 +1010,7 @@ class PagosCreditoViewSet(viewsets.ModelViewSet):
                         detail=detail,
                     )
                     return self._error_response(detail, 'IDEMPOTENCY_CONFLICT', status.HTTP_409_CONFLICT)
+
                 if (
                     operacion.estado == OperacionPrelacionPago.ESTADO_COMPLETED
                     and operacion.response_payload
@@ -1025,6 +1031,7 @@ class PagosCreditoViewSet(viewsets.ModelViewSet):
                         response_data,
                         status=operacion.http_status or status.HTTP_200_OK,
                     )
+
                 if operacion.estado == OperacionPrelacionPago.ESTADO_IN_PROGRESS:
                     detail = 'La operación con este Idempotency-Key está en progreso.'
                     self._log_prelacion_event(
@@ -1057,15 +1064,6 @@ class PagosCreditoViewSet(viewsets.ModelViewSet):
                         'completed_at',
                         'updated_at',
                     ]
-                )
-            else:
-                operacion = OperacionPrelacionPago.objects.create(
-                    tipo=OperacionPrelacionPago.TIPO_CLIENTE,
-                    entidad_id=cliente_id_int,
-                    idempotency_key=idempotency_key,
-                    request_hash=request_hash,
-                    estado=OperacionPrelacionPago.ESTADO_IN_PROGRESS,
-                    created_by=request.user,
                 )
 
         try:
