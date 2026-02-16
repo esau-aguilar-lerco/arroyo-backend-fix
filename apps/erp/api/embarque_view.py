@@ -171,7 +171,7 @@ class EmbarqueListCreateAPIView(APIView):
             name='fase',
             type=OpenApiTypes.STR,
             location=OpenApiParameter.QUERY,
-            description='Filtrar por fase de la venta (PRE VENTA, EN CURSO, etc.)',
+            description='Filtrar por fase de la venta (incluye PROGRAMADO para pedidos pendientes de carga)',
             required=False
         ),
     ],
@@ -202,6 +202,7 @@ class EmbarqueListCreateAPIView(APIView):
                         'fase': serializers.CharField(),
                         'total': serializers.DecimalField(max_digits=10, decimal_places=2),
                         'is_total_cargado': serializers.BooleanField(),
+                        'estatus_pedido': serializers.CharField(help_text='PROGRAMADO cuando aún no termina la carga'),
                         'productos': inline_serializer(
                             name='ProductoDetalle',
                             fields={
@@ -236,6 +237,9 @@ def listar_preventas_con_detalles_carga(request):
         # Obtener parámetros de filtro
         ruta_id = request.query_params.get('ruta_id')
         fase = request.query_params.get('fase', Venta.FASE_PRE_VENTA)
+        fase_normalizada = (fase or '').strip().upper()
+        if fase_normalizada == 'PROGRAMADO':
+            fase = Venta.FASE_PRE_VENTA
         solo_productos = request.query_params.get('solo_productos', '').lower() == 'true'
         user = request.user
         ruta = None
@@ -394,6 +398,7 @@ def listar_preventas_con_detalles_carga(request):
                 'ruta_id': preventa.ruta.id if preventa.ruta else None,
                 'ruta_nombre': preventa.ruta.nombre if preventa.ruta else 'Sin ruta',
                 'ruta_codigo': preventa.ruta.codigo if preventa.ruta else 'Sin código',
+                'estatus_pedido': 'PROGRAMADO' if not preventa.is_total_cargado else 'CARGADO',
                 'productos': productos_data,
             }
             
