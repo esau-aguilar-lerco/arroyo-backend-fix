@@ -445,9 +445,10 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
             solicitud = (
                 SolicitudTraspaso.objects
                 .select_for_update()
-                .select_related('almacen_solicitante', 'almacen_surtidor')
-                .prefetch_related('detalles', 'detalles__producto')
                 .get(pk=pk)
+            )
+            detalles_solicitud = list(
+                solicitud.detalles.select_related('producto').all()
             )
 
             # Idempotencia por estado final
@@ -481,7 +482,7 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
             faltantes = []
             lotes_asignados = []
             resumen_detalles = []
-            for det in solicitud.detalles.all():
+            for det in detalles_solicitud:
                 cantidad_solicitada = self._q3(det.cantidad)
                 cantidad_abastecida = self._q3(cantidades_abastecidas.get(det.id, cantidad_solicitada))
 
@@ -629,9 +630,10 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
             solicitud = (
                 SolicitudTraspaso.objects
                 .select_for_update()
-                .select_related('almacen_solicitante', 'almacen_surtidor')
-                .prefetch_related('detalles', 'detalles__producto')
                 .get(pk=pk)
+            )
+            detalles_solicitud = list(
+                solicitud.detalles.select_related('producto').all()
             )
 
             # Idempotencia por estado final
@@ -660,7 +662,7 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
                 solicitud=solicitud,
                 faltantes=[
                     {'producto': d.producto, 'cantidad': self._q3(d.cantidad)}
-                    for d in solicitud.detalles.all()
+                    for d in detalles_solicitud
                 ],
                 user=request.user,
             )
