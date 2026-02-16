@@ -1,3 +1,5 @@
+from decimal import Decimal, ROUND_HALF_UP
+
 from django.utils import timezone
 from django.db import transaction
 
@@ -9,7 +11,10 @@ from rest_framework.permissions import IsAuthenticated
 
 from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiParameter
 
-from apps.inventario.models import SolicitudTraspaso, SolicitudTraspasoDetalle
+from apps.inventario.models import (
+    SolicitudTraspaso,
+    ProductosSolicitud,
+)
 from apps.inventario.serializers.traspaso.traspasoSolicitudSerializer import (
     SolicitudTraspasoListSerializer,
     SolicitudTraspasoDetailSerializer,
@@ -18,9 +23,7 @@ from apps.inventario.serializers.traspaso.traspasoSolicitudSerializer import (
 )
 
 from django.contrib.auth import get_user_model
-from apps.inventario.models import MovimientoInventario, LoteInventario
-from apps.inventario.helpers.movimientoSalida import movimento_inventario
-from apps.erp.models import Almacen
+from apps.inventario.models import MovimientoInventario, LoteInventario, ProductosMovimiento
 
 User = get_user_model()
 
@@ -89,6 +92,142 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
         elif self.action in ['aprobar', 'rechazar']:
             return AprobarRechazarSolicitudSerializer
         return SolicitudTraspasoDetailSerializer
+
+    @staticmethod
+    def _q3(valor):
+        return Decimal(str(valor)).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+
+    def _resolver_abastecidas(self, solicitud, detalles_payload):
+        """
+        Devuelve un dict {detalle_id: cantidad_abastecida} con fallback a cantidad solicitada.
+        Soporta identificar por detalle_id o producto.
+        """
+        por_detalle = {}
+        por_producto = {}
+        for item in (detalles_payload or []):
+            cantidad = self._q3(item.get('cantidad_abastecida', 0))
+            if item.get('detalle_id') is not None:
+                por_detalle[int(item['detalle_id'])] = cantidad
+            elif item.get('producto') is not None:
+                por_producto[int(item['producto'])] = cantidad
+
+        resultado = {}
+        for det in solicitud.detalles.all():
+            if det.id in por_detalle:
+                resultado[det.id] = por_detalle[det.id]
+            elif det.producto_id in por_producto:
+                resultado[det.id] = por_producto[det.producto_id]
+            else:
+                resultado[det.id] = self._q3(det.cantidad)
+        return resultado
+
+    def _crear_solicitudes_compra(self, solicitud, faltantes, user):
+        """
+        Genera solicitudes de compra (ProductosSolicitud) para cantidades faltantes.
+        faltantes: list[{'producto': Producto, 'cantidad': Decimal}]
+        """
+        creadas = []
+        creador = solicitud.created_by or user
+        for item in faltantes:
+            cantidad = self._q3(item['cantidad'])
+            if cantidad <= 0:
+                continue
+            model = ProductosSolicitud.objects.create(
+                almacen=solicitud.almacen_solicitante,
+                producto=item['producto'],
+                cantidad=cantidad,
+                motivo=ProductosSolicitud.MOTIVO_BAJA,
+                fase=ProductosSolicitud.SOLICITUD,
+                created_by=creador,
+                updated_by=user,
+            )
+            creadas.append(model)
+        return creadas
+
+    def _crear_movimientos_traspaso(self, solicitud, lotes_asignados, user):
+        """
+        Crea y aplica movimientos de salida (surtidor) y entrada (solicitante)
+        afectando inventario en ambos almacenes.
+        """
+        total = Decimal('0.000')
+        for item in lotes_asignados:
+            total += self._q3(item['cantidad'])
+
+        if total <= 0:
+            return None, None
+
+        movimiento_salida = MovimientoInventario.objects.create(
+            almacen=solicitud.almacen_surtidor,
+            almacen_destino=solicitud.almacen_solicitante,
+            tipo=MovimientoInventario.TIPO_SALIDA,
+            movimiento=MovimientoInventario.SALIDA_TRASPASO,
+            cantidad=total,
+            referencia=f"TRASP-SALIDA-SOL-{solicitud.id}",
+            nota=f"Salida por aprobación de solicitud #{solicitud.id}",
+            detalle_nota=(
+                f"SALIDA DE {solicitud.almacen_surtidor.nombre} "
+                f"A {solicitud.almacen_solicitante.nombre}"
+            ),
+            fase=MovimientoInventario.FASE_TERMINADA,
+            created_by=user,
+            updated_by=user,
+        )
+        movimiento_entrada = MovimientoInventario.objects.create(
+            almacen=solicitud.almacen_solicitante,
+            almacen_destino=solicitud.almacen_solicitante,
+            tipo=MovimientoInventario.TIPO_ENTRADA,
+            movimiento=MovimientoInventario.ENTRADA_TRASPASO,
+            cantidad=total,
+            referencia=f"TRASP-ENTRADA-SOL-{solicitud.id}",
+            nota=f"Entrada por aprobación de solicitud #{solicitud.id}",
+            detalle_nota=(
+                f"ENTRADA EN {solicitud.almacen_solicitante.nombre} "
+                f"DESDE {solicitud.almacen_surtidor.nombre}"
+            ),
+            fase=MovimientoInventario.FASE_TERMINADA,
+            created_by=user,
+            updated_by=user,
+        )
+
+        for item in lotes_asignados:
+            producto = item['producto']
+            lote_origen = item['lote']
+            cantidad = self._q3(item['cantidad'])
+
+            # salida: resta del surtidor
+            ProductosMovimiento.objects.create(
+                movimiento=movimiento_salida,
+                producto=producto,
+                lote=lote_origen,
+                cantidad=cantidad,
+                costo_unitario=lote_origen.costo_unitario,
+                created_by=user,
+                updated_by=user,
+            )
+
+            # entrada: suma al solicitante en un lote nuevo por trazabilidad
+            lote_destino = LoteInventario.objects.create(
+                referencia=f"TRASP-SOL-{solicitud.id}-ORIG-{lote_origen.id}",
+                lote_herencia=lote_origen,
+                producto=producto,
+                almacen=solicitud.almacen_solicitante,
+                cantidad=Decimal('0.000'),
+                costo_unitario=lote_origen.costo_unitario,
+                fecha_vencimiento=lote_origen.fecha_vencimiento,
+                created_by=user,
+                updated_by=user,
+            )
+            ProductosMovimiento.objects.create(
+                movimiento=movimiento_entrada,
+                producto=producto,
+                lote=lote_destino,
+                cantidad=cantidad,
+                costo_unitario=lote_destino.costo_unitario,
+                created_by=user,
+                updated_by=user,
+            )
+
+        return movimiento_salida, movimiento_entrada
     
     @extend_schema(
         summary="Listar solicitudes de traspaso",
@@ -299,27 +438,128 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
         """
         Aprobar una solicitud de traspaso
         """
-        solicitud = self.get_object()
-        
-        # Validar que esté pendiente
-        if solicitud.estado != SolicitudTraspaso.PENDIENTE:
-            return Response(
-                {
-                    "success": False,
-                    "message": f"No se puede aprobar una solicitud en estado {solicitud.estado}",
-                    "estado_actual": solicitud.estado
-                },
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        
+
         with transaction.atomic():
+            solicitud = (
+                SolicitudTraspaso.objects
+                .select_for_update()
+                .select_related('almacen_solicitante', 'almacen_surtidor')
+                .prefetch_related('detalles', 'detalles__producto')
+                .get(pk=pk)
+            )
+
+            # Idempotencia por estado final
+            if solicitud.estado == SolicitudTraspaso.APROBADO:
+                response_data = SolicitudTraspasoDetailSerializer(solicitud).data
+                response_data['idempotent_replay'] = True
+                return Response(
+                    {
+                        "success": True,
+                        "message": "Solicitud ya estaba aprobada",
+                        "data": response_data
+                    },
+                    status=status.HTTP_200_OK
+                )
+
+            if solicitud.estado == SolicitudTraspaso.RECHAZADO:
+                return Response(
+                    {
+                        "success": False,
+                        "message": "No se puede aprobar una solicitud ya rechazada",
+                        "estado_actual": solicitud.estado
+                    },
+                    status=status.HTTP_409_CONFLICT
+                )
+
+            cantidades_abastecidas = self._resolver_abastecidas(
+                solicitud=solicitud,
+                detalles_payload=serializer.validated_data.get('detalles', [])
+            )
+
+            faltantes = []
+            lotes_asignados = []
+            resumen_detalles = []
+            for det in solicitud.detalles.all():
+                cantidad_solicitada = self._q3(det.cantidad)
+                cantidad_abastecida = self._q3(cantidades_abastecidas.get(det.id, cantidad_solicitada))
+
+                if cantidad_abastecida > 0:
+                    cantidad_restante = cantidad_abastecida
+                    lotes = (
+                        LoteInventario.objects
+                        .select_for_update()
+                        .filter(
+                            producto=det.producto,
+                            almacen=solicitud.almacen_surtidor,
+                            cantidad__gt=0,
+                            status_model=LoteInventario.STATUS_MODEL_ACTIVE
+                        )
+                        .order_by('created_at', 'id')
+                    )
+
+                    for lote in lotes:
+                        if cantidad_restante <= 0:
+                            break
+                        tomar = min(self._q3(lote.cantidad), cantidad_restante)
+                        if tomar <= 0:
+                            continue
+
+                        lotes_asignados.append({
+                            'producto': det.producto,
+                            'lote': lote,
+                            'cantidad': tomar,
+                        })
+                        cantidad_restante = self._q3(cantidad_restante - tomar)
+
+                    if cantidad_restante > 0:
+                        raise ValidationError({
+                            "success": False,
+                            "message": "No hay suficiente inventario para surtir la solicitud",
+                            "errors": {
+                                "detail": (
+                                    f"Producto {det.producto.codigo} sin stock suficiente. "
+                                    f"Solicitado para abastecer: {cantidad_abastecida}, "
+                                    f"faltante en surtidor: {cantidad_restante}"
+                                )
+                            }
+                        })
+
+                faltante = Decimal('0.000')
+                if cantidad_abastecida < cantidad_solicitada:
+                    faltante = self._q3(cantidad_solicitada - cantidad_abastecida)
+                    faltantes.append({
+                        'producto': det.producto,
+                        'cantidad': faltante,
+                    })
+
+                resumen_detalles.append({
+                    "detalle_id": det.id,
+                    "producto_id": det.producto_id,
+                    "producto_codigo": det.producto.codigo if det.producto else "",
+                    "cantidad_solicitada": float(cantidad_solicitada),
+                    "cantidad_abastecida": float(cantidad_abastecida),
+                    "cantidad_faltante": float(faltante),
+                })
+
+            movimiento_salida, movimiento_entrada = self._crear_movimientos_traspaso(
+                solicitud=solicitud,
+                lotes_asignados=lotes_asignados,
+                user=request.user,
+            )
+
+            solicitudes_compra = self._crear_solicitudes_compra(
+                solicitud=solicitud,
+                faltantes=faltantes,
+                user=request.user,
+            )
+
             # Actualizar solicitud
             solicitud.estado = SolicitudTraspaso.APROBADO
             solicitud.aprobado_el = timezone.now()
             solicitud.aprobado_por = request.user
+            solicitud.movimiento = movimiento_salida
             
             # Agregar nota si se proporcionó
             nota_aprobacion = serializer.validated_data.get('nota', '')
@@ -329,80 +569,29 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
                 else:
                     solicitud.nota = f"[APROBACIÓN] {nota_aprobacion}"
 
-            # ✅ Preparar detalle de lotes (FIFO) para movimiento de traspaso
-            detalle_lotes = []
-
-            # Validar que exista almacén virtual de traspaso
-            almacen_traspaso = Almacen.objects.filter(
-                tipo=Almacen.TIPO_TRASPASO,
-                pertence=solicitud.almacen_surtidor
-            ).first()
-            if not almacen_traspaso:
-                raise ValidationError({
-                    "success": False,
-                    "message": "No existe almacén virtual de traspaso para el almacén surtidor",
-                    "errors": {"detail": f"Configure un almacén tipo TRASPASO que pertenezca a {solicitud.almacen_surtidor.nombre}"}
-                })
-
-            for det in solicitud.detalles.all():
-                # 🔹 LOTE ORIGEN (surtidor)
-                cantidad_restante = det.cantidad
-
-                lotes = LoteInventario.objects.select_for_update().filter(
-                    producto=det.producto,
-                    almacen=solicitud.almacen_surtidor,
-                    cantidad__gt=0,
-                    status_model=LoteInventario.STATUS_MODEL_ACTIVE
-                ).order_by('created_at')
-
-                lotes_asignados = []
-
-                for lote in lotes:
-                    if cantidad_restante <= 0:
-                        break
-                    tomar = min(lote.cantidad, cantidad_restante)
-                    lotes_asignados.append({
-                        'lote': lote,
-                        'cantidad': tomar
-                    })
-                    cantidad_restante -= tomar
-
-                if cantidad_restante > 0:
-                    raise ValidationError({
-                        "success": False,
-                        "message": "No hay suficiente inventario para surtir la solicitud",
-                        "errors": {"detail": f"No hay suficiente inventario total del siguiente producto: {det.producto.nombre}"}
-                    })
-
-                detalle_lotes.append({
-                    'producto': det.producto,
-                    'cantidad': det.cantidad,
-                    'lotes': lotes_asignados
-                })
-
-            # ✅ Crear movimiento de traspaso (salida + virtual)
-            movimiento = movimento_inventario(
-                detalle_lotes=detalle_lotes,
-                almacen_salida=solicitud.almacen_surtidor,
-                almacen_destino=solicitud.almacen_solicitante,
-                movimiento=MovimientoInventario.TIPO_SALIDA,
-                sub_movimiento=MovimientoInventario.SALIDA_TRASPASO,
-                nota=f"TRASPASO SOLICITUD {solicitud.id}",
-                user=request.user
-            )
-            # guardar relación
-            solicitud.movimiento = movimiento
             solicitud.save()
 
-            # movimiento = crear_movimiento_traspaso(solicitud)
-            # solicitud.movimiento = movimiento
-            # solicitud.save()
-        
+        data = SolicitudTraspasoDetailSerializer(solicitud).data
+        data['movimientos'] = {
+            "salida_id": movimiento_salida.id if movimiento_salida else None,
+            "entrada_id": movimiento_entrada.id if movimiento_entrada else None,
+        }
+        data['resumen_abastecimiento'] = resumen_detalles
+        data['solicitudes_compra_generadas'] = [
+            {
+                "id": s.id,
+                "producto_id": s.producto_id,
+                "producto_codigo": s.producto.codigo if s.producto else "",
+                "cantidad": float(s.cantidad),
+            }
+            for s in solicitudes_compra
+        ]
+
         return Response(
             {
                 "success": True,
                 "message": "Solicitud aprobada exitosamente",
-                "data": SolicitudTraspasoDetailSerializer(solicitud).data
+                "data": data
             },
             status=status.HTTP_200_OK
         )
@@ -433,23 +622,49 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
         """
         Rechazar una solicitud de traspaso
         """
-        solicitud = self.get_object()
-        
-        # Validar que esté pendiente
-        if solicitud.estado != SolicitudTraspaso.PENDIENTE:
-            return Response(
-                {
-                    "success": False,
-                    "message": f"No se puede rechazar una solicitud en estado {solicitud.estado}",
-                    "estado_actual": solicitud.estado
-                },
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         
         with transaction.atomic():
+            solicitud = (
+                SolicitudTraspaso.objects
+                .select_for_update()
+                .select_related('almacen_solicitante', 'almacen_surtidor')
+                .prefetch_related('detalles', 'detalles__producto')
+                .get(pk=pk)
+            )
+
+            # Idempotencia por estado final
+            if solicitud.estado == SolicitudTraspaso.RECHAZADO:
+                response_data = SolicitudTraspasoDetailSerializer(solicitud).data
+                response_data['idempotent_replay'] = True
+                return Response(
+                    {
+                        "success": True,
+                        "message": "Solicitud ya estaba rechazada",
+                        "data": response_data
+                    },
+                    status=status.HTTP_200_OK
+                )
+            if solicitud.estado == SolicitudTraspaso.APROBADO:
+                return Response(
+                    {
+                        "success": False,
+                        "message": "No se puede rechazar una solicitud ya aprobada",
+                        "estado_actual": solicitud.estado
+                    },
+                    status=status.HTTP_409_CONFLICT
+                )
+
+            solicitudes_compra = self._crear_solicitudes_compra(
+                solicitud=solicitud,
+                faltantes=[
+                    {'producto': d.producto, 'cantidad': self._q3(d.cantidad)}
+                    for d in solicitud.detalles.all()
+                ],
+                user=request.user,
+            )
+
             solicitud.estado = SolicitudTraspaso.RECHAZADO
             solicitud.rechazado_el = timezone.now()
             solicitud.rechazado_por = request.user
@@ -463,12 +678,22 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
 
             solicitud.save()
 
-        
+        data = SolicitudTraspasoDetailSerializer(solicitud).data
+        data['solicitudes_compra_generadas'] = [
+            {
+                "id": s.id,
+                "producto_id": s.producto_id,
+                "producto_codigo": s.producto.codigo if s.producto else "",
+                "cantidad": float(s.cantidad),
+            }
+            for s in solicitudes_compra
+        ]
+
         return Response(
             {
                 "success": True,
                 "message": "Solicitud rechazada exitosamente",
-                "data": SolicitudTraspasoDetailSerializer(solicitud).data
+                "data": data
             },
             status=status.HTTP_200_OK
         )
