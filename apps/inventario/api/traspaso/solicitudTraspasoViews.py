@@ -328,9 +328,7 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
                     solicitud.nota += f"\n\n[APROBACIÓN] {nota_aprobacion}"
                 else:
                     solicitud.nota = f"[APROBACIÓN] {nota_aprobacion}"
-            
-            solicitud.save()
-            
+
             # ✅ Preparar detalle de lotes (FIFO) para movimiento de traspaso
             detalle_lotes = []
 

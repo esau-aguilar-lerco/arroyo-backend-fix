@@ -6,7 +6,7 @@ from django.db.models.signals import post_save
 from django.dispatch import receiver
 
 
-@receiver(post_save, sender=ProductosSolicitud)
+@receiver(post_save, sender=ProductosSolicitud, dispatch_uid='inventario_productos_solicitud_guardado')
 def productos_solicitud_guardado(sender, instance, created, **kwargs):
     if created:
         #buscae el usuario que tenga el permiso de compras o orden de compra create o el grupo de compras
@@ -33,7 +33,7 @@ def productos_solicitud_guardado(sender, instance, created, **kwargs):
             usuario_id=user_id
         )
         
-@receiver(post_save, sender=SolicitudTraspaso)
+@receiver(post_save, sender=SolicitudTraspaso, dispatch_uid='inventario_solicitud_traspaso_guardado')
 def solicitud_traspaso_guardado(sender, instance, created, **kwargs):
     if created:
         encargado = instance.almacen_surtidor.encargado
@@ -51,16 +51,30 @@ def solicitud_traspaso_guardado(sender, instance, created, **kwargs):
         if instance.estado == SolicitudTraspaso.APROBADO:
             encargado_destino = instance.almacen_solicitante.encargado
             encargado_origen = instance.created_by
-            Notificacion.objects.create(
+            mensaje = (
+                f"Solicitud #{instance.id} aprobada. "
+                f"Traspaso desde '{instance.almacen_surtidor.nombre}' "
+                f"al almacén '{instance.almacen_solicitante.nombre}'.\n"
+                f"Por favor, prepara la recepción de los productos en el sistema."
+            )
+            usuario_id = encargado_destino.id if encargado_destino else 1
+
+            # Evita duplicados por múltiples saves sobre la misma solicitud aprobada.
+            ya_existe = Notificacion.objects.filter(
                 tipo=Notificacion.TIPO_MENSAJE,
                 titulo="¡Solicitud de Traspaso Aprobada!",
-                mensaje=(
-                f"La solicitud de traspaso desde el almacén "
-                f"'{instance.almacen_surtidor.nombre}' al almacén '{instance.almacen_solicitante.nombre}' ha sido aprobada.\n"
-                f"Por favor, prepara la recepción de los productos en el sistema."
-                ),
-                usuario_id=encargado_destino.id if encargado_destino else 1
-            )
+                mensaje=mensaje,
+                usuario_id=usuario_id,
+                status_model=Notificacion.STATUS_MODEL_ACTIVE
+            ).exists()
+
+            if not ya_existe:
+                Notificacion.objects.create(
+                    tipo=Notificacion.TIPO_MENSAJE,
+                    titulo="¡Solicitud de Traspaso Aprobada!",
+                    mensaje=mensaje,
+                    usuario_id=usuario_id
+                )
         elif instance.estado == SolicitudTraspaso.RECHAZADO:
             #crear la solicitud a cedis 
             from apps.inventario.models import Almacen
