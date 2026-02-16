@@ -1,3 +1,6 @@
+import hashlib
+import json
+import logging
 from decimal import Decimal, InvalidOperation
 
 from rest_framework import viewsets, mixins, status
@@ -13,7 +16,7 @@ from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiRespon
 from drf_spectacular.types import OpenApiTypes
 
 from apps.base.serachFilter import MinimalSearchFilter
-from apps.credito.models import CreditoCliente, PagosCredito
+from apps.credito.models import CreditoCliente, OperacionPrelacionPago, PagosCredito
 from apps.contabilidad.models import MetodoPago
 from apps.credito.serializers.credito import (
     CreditoClienteSerializer,
@@ -26,6 +29,8 @@ from apps.credito.serializers.credito import (
     PagoCreditoCancelarSerializer,
     EstadisticasClienteResponseSerializer,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class CreditoClienteMiniViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
@@ -694,6 +699,57 @@ class PagosCreditoViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     @staticmethod
+    def _error_response(detail, code, http_status):
+        return Response({'detail': detail, 'code': code}, status=http_status)
+
+    def _log_prelacion_event(
+        self,
+        request,
+        *,
+        event,
+        entidad_id,
+        idempotency_key=None,
+        total=None,
+        operacion_id=None,
+        code=None,
+        detail=None,
+    ):
+        caja_id = None
+        try:
+            caja_apertura = request.user.get_mi_caja() if request.user else None
+            caja_id = getattr(caja_apertura, 'caja_id', None) or getattr(caja_apertura, 'id', None)
+        except Exception:
+            caja_id = None
+
+        payload = {
+            'event': event,
+            'operacion_id': operacion_id,
+            'entidad': 'CLIENTE',
+            'entidad_id': entidad_id,
+            'idempotency_key': idempotency_key,
+            'total': str(total) if total is not None else None,
+            'usuario_id': getattr(request.user, 'id', None),
+            'caja_id': caja_id,
+            'code': code,
+            'detail': detail,
+        }
+        logger.info(
+            'prelacion_pago_event %s',
+            json.dumps(payload, sort_keys=True, default=str),
+        )
+
+    @staticmethod
+    def _map_prelacion_error_code(detail):
+        message = (detail or '').lower()
+        if 'no tiene créditos activos' in message:
+            return 'NO_ACTIVE_CREDITS'
+        if 'excede el adeudo total' in message:
+            return 'AMOUNT_EXCEEDS_BALANCE'
+        if 'no fue posible distribuir los pagos' in message:
+            return 'PAYMENT_DISTRIBUTION_ERROR'
+        return 'PRELACION_ERROR'
+
+    @staticmethod
     def _to_money(value, field_name='monto'):
         try:
             amount = Decimal(str(value)).quantize(Decimal('0.01'))
@@ -749,6 +805,37 @@ class PagosCreditoViewSet(viewsets.ModelViewSet):
             item['restante'] = (item['restante'] - usar).quantize(Decimal('0.01'))
             restante = (restante - usar).quantize(Decimal('0.01'))
         return pagos_credito, restante
+
+    @staticmethod
+    def _resolve_idempotency_key(request):
+        key = (
+            request.headers.get('Idempotency-Key')
+            or request.data.get('idempotency_key')
+            or ''
+        ).strip()
+        if not key:
+            raise ValueError('Debe enviar Idempotency-Key en header o idempotency_key en body.')
+        if len(key) > 128:
+            raise ValueError('Idempotency-Key excede 128 caracteres.')
+        return key
+
+    @staticmethod
+    def _build_request_hash(cliente_id, cantidad_pagar, pool):
+        canonical = {
+            'tipo': 'CLIENTE',
+            'cliente': int(cliente_id),
+            'cantidad_pagar': str(cantidad_pagar.quantize(Decimal('0.01'))),
+            'pagos': [
+                {
+                    'metodo_pago': int(item['metodo_pago']),
+                    'monto': str(item['restante'].quantize(Decimal('0.01'))),
+                    'referencia': item['referencia'],
+                }
+                for item in pool
+            ],
+        }
+        raw = json.dumps(canonical, sort_keys=True, separators=(',', ':'))
+        return hashlib.sha256(raw.encode('utf-8')).hexdigest()
     
     def get_queryset(self):
         """Queryset con select_related para optimizar consultas"""
@@ -833,7 +920,6 @@ class PagosCreditoViewSet(viewsets.ModelViewSet):
         return super().list(request, *args, **kwargs)
 
     @action(detail=False, methods=['post'], url_path='prelacion')
-    @transaction.atomic
     def prelacion(self, request):
         """
         Aplica un pago global a los créditos activos de un cliente por prelación:
@@ -841,101 +927,288 @@ class PagosCreditoViewSet(viewsets.ModelViewSet):
         """
         cliente_id = request.data.get('cliente')
         if not cliente_id:
-            return Response(
-                {'detail': 'Debe enviar el campo cliente.'},
-                status=status.HTTP_400_BAD_REQUEST
+            return self._error_response(
+                'Debe enviar el campo cliente.',
+                'MISSING_CLIENTE',
+                status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            cliente_id_int = int(cliente_id)
+        except (TypeError, ValueError):
+            return self._error_response(
+                'El campo cliente debe ser un entero válido.',
+                'INVALID_CLIENTE_ID',
+                status.HTTP_400_BAD_REQUEST,
             )
 
         try:
             cantidad_pagar = self._to_money(request.data.get('cantidad_pagar'), 'cantidad_pagar')
         except ValueError as exc:
-            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            return self._error_response(str(exc), 'INVALID_AMOUNT', status.HTTP_400_BAD_REQUEST)
+
+        try:
+            idempotency_key = self._resolve_idempotency_key(request)
+        except ValueError as exc:
+            return self._error_response(str(exc), 'IDEMPOTENCY_KEY_INVALID', status.HTTP_400_BAD_REQUEST)
 
         try:
             pool, total_pagos = self._build_payment_pool(request.data.get('pagos', []))
         except ValueError as exc:
-            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            return self._error_response(str(exc), 'INVALID_PAYMENT_SPLIT', status.HTTP_400_BAD_REQUEST)
+
+        request_hash = self._build_request_hash(cliente_id_int, cantidad_pagar, pool)
+        self._log_prelacion_event(
+            request,
+            event='REQUEST_RECEIVED',
+            entidad_id=cliente_id_int,
+            idempotency_key=idempotency_key,
+            total=cantidad_pagar,
+        )
 
         if total_pagos != cantidad_pagar:
-            return Response(
-                {
-                    'detail': (
-                        f'El total de pagos (${total_pagos}) debe coincidir '
-                        f'con cantidad_pagar (${cantidad_pagar}).'
+            return self._error_response(
+                (
+                    f'El total de pagos (${total_pagos}) debe coincidir '
+                    f'con cantidad_pagar (${cantidad_pagar}).'
+                ),
+                'PAYMENT_TOTAL_MISMATCH',
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            operacion = (
+                OperacionPrelacionPago.objects.select_for_update()
+                .filter(
+                    tipo=OperacionPrelacionPago.TIPO_CLIENTE,
+                    entidad_id=cliente_id_int,
+                    idempotency_key=idempotency_key,
+                    status_model=OperacionPrelacionPago.STATUS_MODEL_ACTIVE,
+                )
+                .first()
+            )
+
+            if operacion:
+                if operacion.request_hash != request_hash:
+                    detail = (
+                        'Idempotency-Key ya fue usado con otro payload '
+                        f'para cliente {cliente_id_int}.'
                     )
-                },
-                status=status.HTTP_400_BAD_REQUEST
-            )
+                    self._log_prelacion_event(
+                        request,
+                        event='IDEMPOTENCY_CONFLICT',
+                        operacion_id=operacion.id,
+                        entidad_id=cliente_id_int,
+                        idempotency_key=idempotency_key,
+                        total=cantidad_pagar,
+                        code='IDEMPOTENCY_CONFLICT',
+                        detail=detail,
+                    )
+                    return self._error_response(detail, 'IDEMPOTENCY_CONFLICT', status.HTTP_409_CONFLICT)
+                if (
+                    operacion.estado == OperacionPrelacionPago.ESTADO_COMPLETED
+                    and operacion.response_payload
+                ):
+                    response_data = dict(operacion.response_payload)
+                    response_data['idempotent_replay'] = True
+                    response_data['code'] = 'IDEMPOTENT_REPLAY'
+                    self._log_prelacion_event(
+                        request,
+                        event='IDEMPOTENT_REPLAY',
+                        operacion_id=operacion.id,
+                        entidad_id=cliente_id_int,
+                        idempotency_key=idempotency_key,
+                        total=cantidad_pagar,
+                        code='IDEMPOTENT_REPLAY',
+                    )
+                    return Response(
+                        response_data,
+                        status=operacion.http_status or status.HTTP_200_OK,
+                    )
+                if operacion.estado == OperacionPrelacionPago.ESTADO_IN_PROGRESS:
+                    detail = 'La operación con este Idempotency-Key está en progreso.'
+                    self._log_prelacion_event(
+                        request,
+                        event='IDEMPOTENCY_IN_PROGRESS',
+                        operacion_id=operacion.id,
+                        entidad_id=cliente_id_int,
+                        idempotency_key=idempotency_key,
+                        total=cantidad_pagar,
+                        code='IDEMPOTENCY_IN_PROGRESS',
+                        detail=detail,
+                    )
+                    return self._error_response(
+                        detail,
+                        'IDEMPOTENCY_IN_PROGRESS',
+                        status.HTTP_409_CONFLICT,
+                    )
 
-        creditos = list(
-            CreditoCliente.objects.filter(
-                cliente_id=cliente_id,
-                is_pagado=False,
-                status_model=CreditoCliente.STATUS_MODEL_ACTIVE,
-            ).order_by('fecha_vencimiento', 'fecha', 'id')
-        )
-
-        if not creditos:
-            return Response(
-                {'detail': 'El cliente no tiene créditos activos para aplicar prelación.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        adeudo_total = sum((c.adeudo_actual() for c in creditos), Decimal('0.00')).quantize(Decimal('0.01'))
-        if cantidad_pagar > adeudo_total:
-            return Response(
-                {'detail': f'La cantidad a pagar (${cantidad_pagar}) excede el adeudo total (${adeudo_total}).'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        restante_global = cantidad_pagar
-        aplicaciones = []
-
-        for credito in creditos:
-            if restante_global <= Decimal('0.00'):
-                break
-            adeudo = credito.adeudo_actual()
-            if adeudo <= Decimal('0.00'):
-                continue
-
-            monto_aplicar = min(adeudo, restante_global).quantize(Decimal('0.01'))
-            pagos_credito, faltante = self._consume_pool(pool, monto_aplicar)
-            if faltante > Decimal('0.00'):
-                return Response(
-                    {'detail': 'No fue posible distribuir los pagos para completar la prelación.'},
-                    status=status.HTTP_400_BAD_REQUEST
+                operacion.estado = OperacionPrelacionPago.ESTADO_IN_PROGRESS
+                operacion.error_message = None
+                operacion.response_payload = None
+                operacion.http_status = None
+                operacion.completed_at = None
+                operacion.save(
+                    update_fields=[
+                        'estado',
+                        'error_message',
+                        'response_payload',
+                        'http_status',
+                        'completed_at',
+                        'updated_at',
+                    ]
+                )
+            else:
+                operacion = OperacionPrelacionPago.objects.create(
+                    tipo=OperacionPrelacionPago.TIPO_CLIENTE,
+                    entidad_id=cliente_id_int,
+                    idempotency_key=idempotency_key,
+                    request_hash=request_hash,
+                    estado=OperacionPrelacionPago.ESTADO_IN_PROGRESS,
+                    created_by=request.user,
                 )
 
-            payload = {
-                'credito': credito.id,
-                'cantidad_pagar': str(monto_aplicar),
-                'pagos': pagos_credito,
-            }
-            serializer = PagoCreditoCreateSingularSerializer(data=payload, context={'request': request})
-            serializer.is_valid(raise_exception=True)
-            credito_actualizado = serializer.save()
+        try:
+            with transaction.atomic():
+                operacion_lock = OperacionPrelacionPago.objects.select_for_update().get(id=operacion.id)
 
-            aplicaciones.append({
-                'credito_id': credito_actualizado.id,
-                'fecha_vencimiento': credito_actualizado.fecha_vencimiento,
-                'monto_aplicado': float(monto_aplicar),
-                'adeudo_restante': float(credito_actualizado.adeudo_actual()),
-                'estado': credito_actualizado.estado,
-            })
-            restante_global = (restante_global - monto_aplicar).quantize(Decimal('0.01'))
+                creditos = list(
+                    CreditoCliente.objects.select_for_update().filter(
+                        cliente_id=cliente_id_int,
+                        is_pagado=False,
+                        status_model=CreditoCliente.STATUS_MODEL_ACTIVE,
+                    ).order_by('fecha_vencimiento', 'fecha', 'id')
+                )
 
-        return Response(
-            {
-                'detail': 'Pago aplicado por prelación correctamente.',
-                'data': {
-                    'cliente_id': int(cliente_id),
-                    'monto_aplicado': float(cantidad_pagar),
-                    'aplicaciones': aplicaciones,
-                    'total_creditos_afectados': len(aplicaciones),
-                },
-            },
-            status=status.HTTP_201_CREATED,
-        )
+                if not creditos:
+                    raise ValueError('El cliente no tiene créditos activos para aplicar prelación.')
+
+                adeudo_total = sum((c.adeudo_actual() for c in creditos), Decimal('0.00')).quantize(Decimal('0.01'))
+                if cantidad_pagar > adeudo_total:
+                    raise ValueError(
+                        f'La cantidad a pagar (${cantidad_pagar}) excede el adeudo total (${adeudo_total}).'
+                    )
+
+                restante_global = cantidad_pagar
+                aplicaciones = []
+                orden_creditos = [c.id for c in creditos]
+
+                for credito in creditos:
+                    if restante_global <= Decimal('0.00'):
+                        break
+                    adeudo_inicial = credito.adeudo_actual()
+                    if adeudo_inicial <= Decimal('0.00'):
+                        continue
+
+                    monto_aplicar = min(adeudo_inicial, restante_global).quantize(Decimal('0.01'))
+                    pagos_credito, faltante = self._consume_pool(pool, monto_aplicar)
+                    if faltante > Decimal('0.00'):
+                        raise ValueError('No fue posible distribuir los pagos para completar la prelación.')
+
+                    payload = {
+                        'credito': credito.id,
+                        'cantidad_pagar': str(monto_aplicar),
+                        'pagos': pagos_credito,
+                    }
+                    serializer = PagoCreditoCreateSingularSerializer(data=payload, context={'request': request})
+                    serializer.is_valid(raise_exception=True)
+                    credito_actualizado = serializer.save()
+
+                    aplicaciones.append({
+                        'credito_id': credito_actualizado.id,
+                        'fecha_vencimiento': (
+                            credito_actualizado.fecha_vencimiento.isoformat()
+                            if credito_actualizado.fecha_vencimiento
+                            else None
+                        ),
+                        'monto_aplicado': float(monto_aplicar),
+                        'adeudo_inicial': float(adeudo_inicial),
+                        'adeudo_restante': float(credito_actualizado.adeudo_actual()),
+                        'estado': credito_actualizado.estado,
+                        'pagos_aplicados': [
+                            {
+                                'metodo_pago': p['metodo_pago'],
+                                'referencia': p.get('referencia', ''),
+                                'monto': float(Decimal(p['monto'])),
+                            }
+                            for p in pagos_credito
+                        ],
+                    })
+                    restante_global = (restante_global - monto_aplicar).quantize(Decimal('0.01'))
+
+                response_payload = {
+                    'detail': 'Pago aplicado por prelación correctamente.',
+                    'code': 'PRELACION_APPLIED',
+                    'data': {
+                        'cliente_id': cliente_id_int,
+                        'idempotency_key': idempotency_key,
+                        'request_hash': request_hash,
+                        'monto_solicitado': float(cantidad_pagar),
+                        'monto_aplicado': float(cantidad_pagar - restante_global),
+                        'monto_no_aplicado': float(restante_global),
+                        'adeudo_total_inicial': float(adeudo_total),
+                        'orden_creditos': orden_creditos,
+                        'aplicaciones': aplicaciones,
+                        'total_creditos_afectados': len(aplicaciones),
+                        'processed_at': timezone.now().isoformat(),
+                    },
+                }
+
+                operacion_lock.estado = OperacionPrelacionPago.ESTADO_COMPLETED
+                operacion_lock.response_payload = response_payload
+                operacion_lock.http_status = status.HTTP_201_CREATED
+                operacion_lock.completed_at = timezone.now()
+                operacion_lock.error_message = None
+                operacion_lock.save(
+                    update_fields=[
+                        'estado',
+                        'response_payload',
+                        'http_status',
+                        'completed_at',
+                        'error_message',
+                        'updated_at',
+                    ]
+                )
+                self._log_prelacion_event(
+                    request,
+                    event='PRELACION_APPLIED',
+                    operacion_id=operacion_lock.id,
+                    entidad_id=cliente_id_int,
+                    idempotency_key=idempotency_key,
+                    total=cantidad_pagar,
+                    code='PRELACION_APPLIED',
+                )
+
+            return Response(response_payload, status=status.HTTP_201_CREATED)
+        except Exception as exc:
+            error_detail = str(exc)
+            error_code = self._map_prelacion_error_code(error_detail)
+            with transaction.atomic():
+                operacion_error = OperacionPrelacionPago.objects.select_for_update().get(id=operacion.id)
+                operacion_error.estado = OperacionPrelacionPago.ESTADO_FAILED
+                operacion_error.error_message = error_detail
+                operacion_error.http_status = status.HTTP_400_BAD_REQUEST
+                operacion_error.completed_at = timezone.now()
+                operacion_error.save(
+                    update_fields=[
+                        'estado',
+                        'error_message',
+                        'http_status',
+                        'completed_at',
+                        'updated_at',
+                    ]
+                )
+            self._log_prelacion_event(
+                request,
+                event='PRELACION_FAILED',
+                operacion_id=operacion.id,
+                entidad_id=cliente_id_int,
+                idempotency_key=idempotency_key,
+                total=cantidad_pagar,
+                code=error_code,
+                detail=error_detail,
+            )
+            return self._error_response(error_detail, error_code, status.HTTP_400_BAD_REQUEST)
     
     @extend_schema(
         summary="Registrar pago de crédito",
