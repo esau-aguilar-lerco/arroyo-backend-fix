@@ -816,14 +816,25 @@ def crear_movimiento_inventario_almacen_embarque_ruta(ruta=None, lotes_list_movi
        
 
 def crear_embarque_ruta(ruta=None, preventas_embarque=None, productos_tara=None, usuario=None):
-    #buscamos el embarque activo o creamos uno nuevo
-    embarque, creado = EmbarqueReparto.objects.get_or_create(
-        ruta=ruta,
-        fase=EmbarqueReparto.FASE_CARGA,
-        defaults={
-            'created_by': usuario
-        }
+    # Buscar embarque vigente en fase programado (incluye valor legacy CARGA).
+    embarque = (
+        EmbarqueReparto.objects.filter(
+            ruta=ruta,
+            fase__in=EmbarqueReparto.fases_programado_compat(),
+        )
+        .order_by('-id')
+        .first()
     )
+
+    if not embarque:
+        embarque = EmbarqueReparto.objects.create(
+            ruta=ruta,
+            fase=EmbarqueReparto.FASE_PROGRAMADO,
+            created_by=usuario,
+        )
+    elif embarque.fase == EmbarqueReparto.FASE_CARGA_LEGACY:
+        embarque.fase = EmbarqueReparto.FASE_PROGRAMADO
+        embarque.save(update_fields=['fase', 'updated_at'])
     
     #cuunt_preventas = len(preventas_embarque)
     
