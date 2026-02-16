@@ -206,6 +206,211 @@ class PagoCreditoProveedorCreateSingularSerializer(serializers.Serializer):
         return credito
 
 
+class PagoCreditoProveedorUpdateSerializer(serializers.Serializer):
+    """
+    Edita un abono existente de proveedor usando pago_id (flujo global).
+    """
+    credito = FlexiblePKRelatedField(
+        queryset=CreditoProveedor.objects.all(),
+        required=False,
+        allow_null=True,
+        help_text="Opcional. Si no se envía, se infiere desde pago_id."
+    )
+    pago_id = serializers.IntegerField(
+        required=False,
+        help_text="ID del pago existente que se desea editar."
+    )
+    pago_anterior_id = serializers.IntegerField(
+        required=False,
+        help_text="Alias legacy de pago_id."
+    )
+    cantidad_pagar = RoundedDecimalField(
+        max_digits=20,
+        decimal_places=4,
+        required=True,
+        help_text="Nuevo monto a aplicar."
+    )
+    pagos = MetodoPagoCajaAperturaSerializer(many=True, required=True)
+
+    def validate_pagos(self, value):
+        if not value:
+            raise serializers.ValidationError("Debe proporcionar al menos un método de pago.")
+        return value
+
+    def validate(self, attrs):
+        request = self.context.get('request')
+        if not request or not request.user:
+            raise serializers.ValidationError("No se pudo obtener el usuario autenticado.")
+
+        pago_id = attrs.get('pago_id') or attrs.get('pago_anterior_id')
+        if not pago_id:
+            raise serializers.ValidationError(
+                "Debe proporcionar pago_id (o pago_anterior_id para compatibilidad)."
+            )
+
+        try:
+            pago_anterior = PagosCreditoProveedor.objects.select_related(
+                'credito_proveedor',
+                'credito_proveedor__proveedor',
+            ).get(id=pago_id)
+        except PagosCreditoProveedor.DoesNotExist:
+            raise serializers.ValidationError("El pago especificado no existe.")
+
+        credito = attrs.get('credito') or pago_anterior.credito_proveedor
+        if pago_anterior.credito_proveedor_id != credito.id:
+            raise serializers.ValidationError(
+                "El pago especificado no pertenece al crédito indicado."
+            )
+        attrs['credito'] = credito
+
+        cantidad_pagar = Decimal(str(attrs['cantidad_pagar'])).quantize(Decimal('0.01'))
+        attrs['cantidad_pagar'] = cantidad_pagar
+
+        adeudo_sin_pago_anterior = (credito.adeudo_actual() + Decimal(str(pago_anterior.monto))).quantize(Decimal('0.01'))
+        if cantidad_pagar > adeudo_sin_pago_anterior:
+            raise serializers.ValidationError(
+                {
+                    'cantidad_pagar': (
+                        f"La cantidad a pagar (${cantidad_pagar}) excede el adeudo disponible "
+                        f"(${adeudo_sin_pago_anterior})."
+                    )
+                }
+            )
+        if cantidad_pagar <= Decimal('0.00'):
+            raise serializers.ValidationError({'cantidad_pagar': "La cantidad a pagar debe ser mayor a cero."})
+
+        total_pagos = sum(Decimal(str(p['monto'])) for p in attrs['pagos']).quantize(Decimal('0.01'))
+        if total_pagos != cantidad_pagar:
+            raise serializers.ValidationError(
+                {
+                    'pagos': (
+                        f"El total de pagos (${total_pagos}) debe coincidir "
+                        f"con la cantidad a pagar (${cantidad_pagar})."
+                    )
+                }
+            )
+
+        attrs['_usuario'] = request.user
+        attrs['_pago_anterior'] = pago_anterior
+        attrs['_total_pagos'] = total_pagos
+        return attrs
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        credito = validated_data['credito']
+        pago_anterior = validated_data['_pago_anterior']
+        pagos_data = validated_data['pagos']
+        cantidad_pagar = validated_data['cantidad_pagar']
+        usuario = validated_data['_usuario']
+
+        monto_anterior = Decimal(str(pago_anterior.monto)).quantize(Decimal('0.01'))
+
+        # 1) Revertir el pago anterior en crédito + proveedor
+        monto_pagado_actual = Decimal(str(credito.monto_pagado or 0)).quantize(Decimal('0.01'))
+        credito.monto_pagado = max(Decimal('0.00'), monto_pagado_actual - monto_anterior).quantize(Decimal('0.01'))
+
+        proveedor = credito.proveedor
+        proveedor_total = Decimal(str(proveedor.total_credito or 0)).quantize(Decimal('0.01'))
+        proveedor.total_credito = (proveedor_total + monto_anterior).quantize(Decimal('0.01'))
+        proveedor.save(update_fields=['total_credito'])
+
+        if credito.is_pagado:
+            credito.is_pagado = False
+            credito.estado = CreditoProveedor.ACTIVA
+            credito.fecha_pago = None
+
+        credito.save(update_fields=['monto_pagado', 'is_pagado', 'estado', 'fecha_pago', 'updated_at'])
+
+        # 2) Eliminar pago anterior
+        pago_anterior.delete()
+
+        # 3) Registrar nuevos pagos
+        for pago_data in pagos_data:
+            PagosCreditoProveedor.objects.create(
+                credito_proveedor=credito,
+                monto=Decimal(str(pago_data['monto'])).quantize(Decimal('0.01')),
+                metodo_pago=pago_data['metodo_pago'],
+                referencia=(pago_data.get('referencia') or '').strip(),
+                created_by=usuario,
+            )
+
+        # 4) Aplicar nuevo monto total
+        monto_pagado_actual = Decimal(str(credito.monto_pagado or 0)).quantize(Decimal('0.01'))
+        monto_credito_total = Decimal(str(credito.monto or 0)).quantize(Decimal('0.01'))
+        credito.monto_pagado = (monto_pagado_actual + cantidad_pagar).quantize(Decimal('0.01'))
+        if credito.monto_pagado > monto_credito_total:
+            credito.monto_pagado = monto_credito_total
+
+        credito.actualizar_saldo_proveedor_pago(cantidad_pagar)
+        credito.save(update_fields=['monto_pagado', 'updated_at'])
+
+        if credito.adeudo_actual() <= Decimal('0.00'):
+            credito.marcar_pagado()
+
+        return credito
+
+
+class PagoCreditoProveedorCancelarSerializer(serializers.Serializer):
+    """
+    Cancela un abono de proveedor usando pago_id.
+    """
+    pago_id = serializers.IntegerField(required=True, help_text="ID del pago a cancelar.")
+    motivo = serializers.CharField(max_length=500, required=False, allow_blank=True, default="")
+
+    def validate(self, attrs):
+        request = self.context.get('request')
+        if not request or not request.user:
+            raise serializers.ValidationError("No se pudo obtener el usuario autenticado.")
+
+        try:
+            pago = PagosCreditoProveedor.objects.select_related(
+                'credito_proveedor',
+                'credito_proveedor__proveedor',
+            ).get(id=attrs['pago_id'])
+        except PagosCreditoProveedor.DoesNotExist:
+            raise serializers.ValidationError("El pago especificado no existe.")
+
+        attrs['_usuario'] = request.user
+        attrs['_pago'] = pago
+        return attrs
+
+    @transaction.atomic
+    def create(self, validated_data):
+        pago = validated_data['_pago']
+        motivo = validated_data.get('motivo', '')
+
+        credito = pago.credito_proveedor
+        proveedor = credito.proveedor
+        monto_pago = Decimal(str(pago.monto)).quantize(Decimal('0.01'))
+
+        credito.monto_pagado = max(
+            Decimal('0.00'),
+            Decimal(str(credito.monto_pagado or 0)).quantize(Decimal('0.01')) - monto_pago
+        ).quantize(Decimal('0.01'))
+        credito.is_pagado = False
+        credito.estado = CreditoProveedor.ACTIVA
+        credito.fecha_pago = None
+        credito.save(update_fields=['monto_pagado', 'is_pagado', 'estado', 'fecha_pago', 'updated_at'])
+
+        proveedor.total_credito = (
+            Decimal(str(proveedor.total_credito or 0)).quantize(Decimal('0.01')) + monto_pago
+        ).quantize(Decimal('0.01'))
+        proveedor.save(update_fields=['total_credito'])
+
+        pago_id = pago.id
+        pago.delete()
+
+        return {
+            'pago_id_cancelado': pago_id,
+            'credito_id': credito.id,
+            'proveedor': proveedor.nombre,
+            'monto_revertido': float(monto_pago),
+            'nuevo_adeudo': float(credito.adeudo_actual()),
+            'motivo': motivo,
+            'mensaje': f'Pago #{pago_id} cancelado exitosamente.'
+        }
+
+
 class PagoCreditoProveedorCreateMasivoSerializer(serializers.Serializer):
     """
     Serializer para crear pagos masivos a múltiples créditos de proveedor
