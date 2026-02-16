@@ -65,7 +65,6 @@ def solicitud_traspaso_guardado(sender, instance, created, **kwargs):
                 titulo="¡Solicitud de Traspaso Aprobada!",
                 mensaje=mensaje,
                 usuario_id=usuario_id,
-                status_model=Notificacion.STATUS_MODEL_ACTIVE
             ).exists()
 
             if not ya_existe:
