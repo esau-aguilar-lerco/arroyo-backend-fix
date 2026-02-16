@@ -68,10 +68,16 @@ class VentaViewSet(viewsets.ModelViewSet):
                 location=OpenApiParameter.QUERY,
                 description='Filtrar por fase de la venta',
                 required=False,
-                enum=['PRE_VENTA', 'EN_PROCESO','CANCELADA'],
+                enum=[
+                    Venta.FASE_PRE_VENTA,
+                    Venta.FASE_VENTA_COMANDA,
+                    Venta.FASE_EN_PROCESO,
+                    Venta.FASE_TERMINADA,
+                    Venta.FASE_CANCELADA,
+                ],
                 examples=[
-                    OpenApiExample('Solo preventas', value='PRE_VENTA'),
-                    OpenApiExample('Solo terminadas', value='TERMINADA'),
+                    OpenApiExample('Solo preventas', value=Venta.FASE_PRE_VENTA),
+                    OpenApiExample('Solo terminadas', value=Venta.FASE_TERMINADA),
                 ]
             ),
             OpenApiParameter(
@@ -164,9 +170,9 @@ class VentaViewSet(viewsets.ModelViewSet):
         is_terminada = request.query_params.get('is_terminada', None)
         if is_terminada is not None:
             if is_terminada.lower() in ['true', '1']:
-                queryset = queryset.filter(is_terminada=True)
+                queryset = queryset.filter(ya_terminada=True)
             elif is_terminada.lower() in ['false', '0']:
-                queryset = queryset.filter(is_terminada=False)
+                queryset = queryset.filter(ya_terminada=False)
 
         # Filtros adicionales
         fase = request.query_params.get('fase', None)
@@ -769,5 +775,3 @@ class VentaDetalleViewSet(viewsets.ModelViewSet):
                 {"detail": f"Error al asignar lotes: {str(e)}"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-
-
