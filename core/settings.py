@@ -27,6 +27,8 @@ IS_LOCAL = os.environ.get("IS_LOCAL", 'True').lower() in ['true', 'yes', '1']
 ALLOWED_HOSTS = ['*', 'localhost', '127.0.0.1']
 CORS_ALLOW_HEADERS = list(default_headers) + [
     'authorization',
+    'idempotency-key',
+    'x-idempotency-key',
 ]
 
 # Application definition
