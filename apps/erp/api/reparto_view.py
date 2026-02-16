@@ -19,7 +19,8 @@ from apps.erp.serializers.reparto.entregaProductoSerializer import EntragaProduc
                 'success': serializers.BooleanField(),
                 'message': serializers.CharField(),
                 'venta_id': serializers.IntegerField(),
-                'productos_entregados': serializers.IntegerField(),
+                'productos_procesados': serializers.IntegerField(),
+                'incidencia_id': serializers.IntegerField(allow_null=True),
             }
         ),
         400: "Error en los datos proporcionados",
@@ -33,7 +34,7 @@ def entrega_producto_ruta(request):
     Registra la entrega de productos de una venta durante el reparto.
     Recibe la venta y los productos con sus cantidades entregadas.
     """
-    serializer = EntragaProductoRutaSerializer(data=request.data)
+    serializer = EntragaProductoRutaSerializer(data=request.data, context={'request': request})
     
     if not serializer.is_valid():
         return Response(
@@ -43,14 +44,17 @@ def entrega_producto_ruta(request):
     try:
         with transaction.atomic():
             
-            venta_actualizada = serializer.save()
-            
-            
+            resultado = serializer.save()
+            venta_actualizada = resultado['venta']
+            incidencia_model = resultado.get('incidencia')
+
             return Response({
                 'success': True,
                 'message': f'Entrega registrada para venta {venta_actualizada.codigo}',
                 'venta_id': venta_actualizada.id,
                 'venta_codigo': venta_actualizada.codigo,
+                'productos_procesados': resultado.get('productos_procesados', 0),
+                'incidencia_id': incidencia_model.id if incidencia_model else None,
             }, status=status.HTTP_200_OK)
             
     except Exception as e:
