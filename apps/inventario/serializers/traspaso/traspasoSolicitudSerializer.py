@@ -245,3 +245,52 @@ class AprobarRechazarSolicitudSerializer(serializers.Serializer):
         max_length=500,
         help_text="Nota opcional para justificar la aprobación o rechazo"
     )
+    detalles = serializers.ListField(
+        child=serializers.DictField(),
+        required=False,
+        allow_empty=True,
+        help_text=(
+            "Opcional solo para aprobación. Permite enviar cantidades abastecidas "
+            "por detalle/producto. Formato por item: "
+            "{detalle_id|producto, cantidad_abastecida|cantidad}"
+        ),
+    )
+
+    def validate_detalles(self, value):
+        normalizados = []
+        for item in value:
+            if not isinstance(item, dict):
+                raise serializers.ValidationError("Cada elemento en detalles debe ser un objeto.")
+
+            detalle_id = item.get('detalle_id')
+            producto_id = item.get('producto')
+            cantidad = item.get('cantidad_abastecida', item.get('cantidad'))
+
+            if detalle_id is None and producto_id is None:
+                raise serializers.ValidationError(
+                    "Cada detalle debe incluir 'detalle_id' o 'producto'."
+                )
+            if cantidad is None:
+                raise serializers.ValidationError(
+                    "Cada detalle debe incluir 'cantidad_abastecida' o 'cantidad'."
+                )
+
+            try:
+                cantidad_decimal = Decimal(str(cantidad))
+            except Exception as exc:
+                raise serializers.ValidationError(
+                    f"Cantidad inválida en detalle: {cantidad}"
+                ) from exc
+
+            if cantidad_decimal < 0:
+                raise serializers.ValidationError(
+                    "La cantidad abastecida no puede ser negativa."
+                )
+
+            normalizados.append({
+                'detalle_id': int(detalle_id) if detalle_id is not None else None,
+                'producto': int(producto_id) if producto_id is not None else None,
+                'cantidad_abastecida': cantidad_decimal
+            })
+
+        return normalizados

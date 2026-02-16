@@ -75,24 +75,6 @@ def solicitud_traspaso_guardado(sender, instance, created, **kwargs):
                     usuario_id=usuario_id
                 )
         elif instance.estado == SolicitudTraspaso.RECHAZADO:
-            #crear la solicitud a cedis 
-            from apps.inventario.models import Almacen
-            from apps.inventario.models import SolicitudTraspasoDetalle
-            cedis = Almacen.objects.filter(is_cedis=True).first()
-            model = SolicitudTraspaso.objects.create(
-                #referencia=f"TRASPASO-CEDIS-{instance.id}",
-                almacen_solicitante=instance.almacen_solicitante,
-                almacen_surtidor_id=cedis.id if cedis else 1,  # Asumiendo que el ID 1 es el de CEDIS
-                estado=SolicitudTraspaso.PENDIENTE,
-                created_by=instance.created_by
-            )
-            productos_detalle = instance.detalles.all()
-            for producto in productos_detalle:
-                SolicitudTraspasoDetalle.objects.create(
-                    solicitud=model,
-                    producto=producto.producto,
-                    cantidad=producto.cantidad,
-                )
             encargado_origen = instance.created_by
             Notificacion.objects.create(
                 tipo=Notificacion.TIPO_MENSAJE,
