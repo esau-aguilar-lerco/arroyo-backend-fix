@@ -214,3 +214,55 @@ class PagosCreditoProveedor(BaseModel):
         if not self.token:
             self.token = uuid.uuid4()
         super().save(*args, **kwargs)
+
+
+class OperacionPrelacionPago(BaseModel):
+    """
+    Registro de operaciones de prelación para garantizar idempotencia y auditoría.
+    """
+    TIPO_CLIENTE = "CLIENTE"
+    TIPO_PROVEEDOR = "PROVEEDOR"
+    TIPO_CHOICES = [
+        (TIPO_CLIENTE, "Cliente"),
+        (TIPO_PROVEEDOR, "Proveedor"),
+    ]
+
+    ESTADO_IN_PROGRESS = "IN_PROGRESS"
+    ESTADO_COMPLETED = "COMPLETED"
+    ESTADO_FAILED = "FAILED"
+    ESTADO_CHOICES = [
+        (ESTADO_IN_PROGRESS, "En proceso"),
+        (ESTADO_COMPLETED, "Completada"),
+        (ESTADO_FAILED, "Fallida"),
+    ]
+
+    tipo = models.CharField(max_length=20, choices=TIPO_CHOICES, db_index=True)
+    entidad_id = models.PositiveIntegerField(db_index=True)
+    idempotency_key = models.CharField(max_length=128)
+    request_hash = models.CharField(max_length=64)
+    estado = models.CharField(
+        max_length=20,
+        choices=ESTADO_CHOICES,
+        default=ESTADO_IN_PROGRESS,
+        db_index=True,
+    )
+    response_payload = models.JSONField(blank=True, null=True)
+    http_status = models.PositiveSmallIntegerField(blank=True, null=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
+    error_message = models.TextField(blank=True, null=True)
+
+    class Meta:
+        verbose_name = "Operación de prelación de pago"
+        verbose_name_plural = "Operaciones de prelación de pago"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tipo", "entidad_id", "idempotency_key"],
+                name="credito_unique_prelacion_idempotency",
+            )
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.tipo} #{self.entidad_id} - key={self.idempotency_key} - "
+            f"{self.estado}"
+        )
