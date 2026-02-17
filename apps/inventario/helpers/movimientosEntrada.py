@@ -10,6 +10,15 @@ def create_movimiento_entrada(model_movimiento,productos_con_lote, user=None,ref
         raise ValueError("Este movimiento ya fue procesado")
     model_movimento_vir = MovimientoInventario.objects.filter(referencia=f'{ref_base}-{model_movimiento.id}').first()
     almacen_destino = model_movimiento.almacen_destino
+    # Compatibilidad:
+    # - Flujos antiguos ya descontaban surtidor al aprobar (tenían productosMovimiento en salida)
+    # - Flujos nuevos difieren el descuento hasta esta recepción (salida sin productosMovimiento)
+    deducir_surtidor_en_recepcion = (
+        model_movimento_vir is not None
+        and model_movimiento.movimiento == MovimientoInventario.SALIDA_TRASPASO
+        and not model_movimiento.productosMovimiento.exists()
+    )
+
     with transaction.atomic():
         model_movimiento.fase = MovimientoInventario.FASE_TERMINADA
         model_movimiento.updated_by = user
@@ -54,27 +63,49 @@ def create_movimiento_entrada(model_movimiento,productos_con_lote, user=None,ref
                 # En traspasos usar el lote del almacén virtual para no tocar CEDIS
                 lote = lote_origen
                 if model_movimento_vir is not None:
-                    ref_virtual = f"TRASP-{model_movimiento.id}-ORIG-{lote_origen.id}"
-                    lote_virtual = LoteInventario.objects.filter(
-                        almacen=model_movimento_vir.almacen_destino,
-                        referencia=ref_virtual
-                    ).first()
-                    if lote_virtual:
-                        lote = lote_virtual
+                    # Si el frontend ya envió un lote virtual, usarlo directo.
+                    if lote_origen.almacen_id == model_movimento_vir.almacen_destino_id:
+                        lote = lote_origen
                     else:
-                        # Fallback para traspasos antiguos sin referencia
+                        ref_virtual = f"TRASP-{model_movimiento.id}-ORIG-{lote_origen.id}"
                         lote_virtual = LoteInventario.objects.filter(
                             almacen=model_movimento_vir.almacen_destino,
-                            producto=producto,
-                            cantidad__gt=0
-                        ).order_by('fecha_ingreso').first()
+                            referencia=ref_virtual
+                        ).first()
                         if lote_virtual:
                             lote = lote_virtual
+                        else:
+                            # Fallback para traspasos antiguos sin referencia
+                            lote_virtual = LoteInventario.objects.filter(
+                                almacen=model_movimento_vir.almacen_destino,
+                                producto=producto,
+                                cantidad__gt=0
+                            ).order_by('fecha_ingreso').first()
+                            if lote_virtual:
+                                lote = lote_virtual
 
                 cantidad_enviada = lote.cantidad
                 if not isinstance(cantidad_enviada, Decimal):
                     cantidad_enviada = Decimal(str(cantidad_enviada))
                 cantidad_enviada = cantidad_enviada.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+
+                if deducir_surtidor_en_recepcion:
+                    lote_origen_real = lote.lote_herencia
+                    if lote_origen_real is None:
+                        raise ValueError(
+                            f"El lote virtual {lote.id} no tiene lote de origen para descontar en surtidor."
+                        )
+                    # Descontar lo enviado (no lo recibido), para que cualquier diferencia
+                    # quede como incidencia y no permanezca en el surtidor.
+                    ProductosMovimiento.objects.create(
+                        movimiento=model_movimiento,
+                        producto=producto,
+                        lote=lote_origen_real,
+                        cantidad=cantidad_enviada,
+                        costo_unitario=lote_origen_real.costo_unitario,
+                        costo_total=cantidad_enviada * lote_origen_real.costo_unitario,
+                        created_by=user
+                    )
 
                 # Validar que la cantidad solicitada no exceda el lote disponible
                 if cantidad_enviada < cantidad:

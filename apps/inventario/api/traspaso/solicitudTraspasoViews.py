@@ -24,6 +24,7 @@ from apps.inventario.serializers.traspaso.traspasoSolicitudSerializer import (
 
 from django.contrib.auth import get_user_model
 from apps.inventario.models import MovimientoInventario, LoteInventario, ProductosMovimiento
+from apps.erp.models import Almacen
 
 User = get_user_model()
 
@@ -172,8 +173,12 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
 
     def _crear_movimientos_traspaso(self, solicitud, lotes_asignados, user):
         """
-        Crea y aplica movimientos de salida (surtidor) y entrada (solicitante)
-        afectando inventario en ambos almacenes.
+        Crea el traspaso en estado pendiente de recepción.
+
+        Importante:
+        - En esta fase NO se afecta inventario del almacén surtidor ni del solicitante.
+        - La afectación real sucede cuando se procesa la entrada pendiente
+          (endpoint de procesar entrada).
         """
         total = Decimal('0.000')
         for item in lotes_asignados:
@@ -181,6 +186,22 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
 
         if total <= 0:
             return None, None
+
+        almacen_virtual = Almacen.objects.filter(
+            tipo=Almacen.TIPO_TRASPASO,
+            pertence=solicitud.almacen_surtidor
+        ).first()
+        if not almacen_virtual:
+            raise ValidationError({
+                "success": False,
+                "message": "No existe almacén virtual de traspaso para el almacén surtidor",
+                "errors": {
+                    "detail": (
+                        f"No se encontró almacén tipo TRASPASO asociado a "
+                        f"{solicitud.almacen_surtidor.nombre}."
+                    )
+                }
+            })
 
         movimiento_salida = MovimientoInventario.objects.create(
             almacen=solicitud.almacen_surtidor,
@@ -194,23 +215,26 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
                 f"SALIDA DE {solicitud.almacen_surtidor.nombre} "
                 f"A {solicitud.almacen_solicitante.nombre}"
             ),
-            fase=MovimientoInventario.FASE_TERMINADA,
+            fase=MovimientoInventario.FASE_PROCESO,
             created_by=user,
             updated_by=user,
         )
-        movimiento_entrada = MovimientoInventario.objects.create(
-            almacen=solicitud.almacen_solicitante,
-            almacen_destino=solicitud.almacen_solicitante,
+
+        # Movimiento virtual para listar lotes "en tránsito" durante la recepción.
+        # Mantiene compatibilidad con el flujo de entrada pendiente.
+        movimiento_entrada_virtual = MovimientoInventario.objects.create(
+            almacen=solicitud.almacen_surtidor,
+            almacen_destino=almacen_virtual,
             tipo=MovimientoInventario.TIPO_ENTRADA,
-            movimiento=MovimientoInventario.ENTRADA_TRASPASO,
+            movimiento=MovimientoInventario.ENTRADA_TRASPASO_VIRTUAL,
             cantidad=total,
-            referencia=f"TRASP-ENTRADA-SOL-{solicitud.id}",
-            nota=f"Entrada por aprobación de solicitud #{solicitud.id}",
+            referencia=f"MOV-TRASP-VIT-{movimiento_salida.id}",
+            nota=f"Entrada virtual por solicitud #{solicitud.id}",
             detalle_nota=(
-                f"ENTRADA EN {solicitud.almacen_solicitante.nombre} "
-                f"DESDE {solicitud.almacen_surtidor.nombre}"
+                f"ENTRADA VIRTUAL DE {solicitud.almacen_surtidor.nombre} "
+                f"PARA {solicitud.almacen_solicitante.nombre}"
             ),
-            fase=MovimientoInventario.FASE_TERMINADA,
+            fase=MovimientoInventario.FASE_PROCESO,
             created_by=user,
             updated_by=user,
         )
@@ -220,40 +244,32 @@ class SolicitudTraspasoViewSet(viewsets.ModelViewSet):
             lote_origen = item['lote']
             cantidad = self._q3(item['cantidad'])
 
-            # salida: resta del surtidor
-            ProductosMovimiento.objects.create(
-                movimiento=movimiento_salida,
-                producto=producto,
-                lote=lote_origen,
-                cantidad=cantidad,
-                costo_unitario=lote_origen.costo_unitario,
-                created_by=user,
-                updated_by=user,
-            )
-
-            # entrada: suma al solicitante en un lote nuevo por trazabilidad
-            lote_destino = LoteInventario.objects.create(
-                referencia=f"TRASP-SOL-{solicitud.id}-ORIG-{lote_origen.id}",
+            # Generar lote virtual para recepción posterior.
+            # Se crea en 0 para que el ProductosMovimiento lo incremente una sola vez.
+            lote_virtual = LoteInventario.objects.create(
+                referencia=f"TRASP-{movimiento_salida.id}-ORIG-{lote_origen.id}",
                 lote_herencia=lote_origen,
                 producto=producto,
-                almacen=solicitud.almacen_solicitante,
+                almacen=almacen_virtual,
                 cantidad=Decimal('0.000'),
                 costo_unitario=lote_origen.costo_unitario,
                 fecha_vencimiento=lote_origen.fecha_vencimiento,
                 created_by=user,
                 updated_by=user,
             )
+
+            # Registra cantidad enviada en tránsito (sin afectar surtidor todavía).
             ProductosMovimiento.objects.create(
-                movimiento=movimiento_entrada,
+                movimiento=movimiento_entrada_virtual,
                 producto=producto,
-                lote=lote_destino,
+                lote=lote_virtual,
                 cantidad=cantidad,
-                costo_unitario=lote_destino.costo_unitario,
+                costo_unitario=lote_virtual.costo_unitario,
                 created_by=user,
                 updated_by=user,
             )
 
-        return movimiento_salida, movimiento_entrada
+        return movimiento_salida, movimiento_entrada_virtual
     
     @extend_schema(
         summary="Listar solicitudes de traspaso",
