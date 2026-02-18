@@ -451,3 +451,18 @@ class MiDataResponseSerializer(serializers.Serializer):
         help_text="ID del almacén asignado al usuario",
         allow_null=True
     )
+    ruta_asignada_id = serializers.IntegerField(
+        help_text="ID de la ruta asignada al usuario",
+        allow_null=True,
+        required=False
+    )
+    ruta_asignada_codigo = serializers.CharField(
+        help_text="Código de la ruta asignada al usuario",
+        allow_blank=True,
+        required=False
+    )
+    ruta_asignada_nombre = serializers.CharField(
+        help_text="Nombre de la ruta asignada al usuario",
+        allow_blank=True,
+        required=False
+    )

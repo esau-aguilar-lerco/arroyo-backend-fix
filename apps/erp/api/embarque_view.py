@@ -14,6 +14,14 @@ from apps.erp.models import Venta, Rutas, Almacen
 from apps.erp.serializers.embarque.embarque_serializer import (
     EmbarqueSerializer, EmbarqueMiniSerializer, VentasEmbarqueSubidaRutaSerializer
 )
+from apps.inventario.services.idempotencia import (
+    IdempotenciaError,
+    adquirir_operacion,
+    completar_operacion,
+    construir_request_hash,
+    fallar_operacion,
+    resolver_idempotency_key,
+)
 
 
 """
@@ -60,6 +68,16 @@ def _get_almacen_origen_carga(ruta=None, user=None, explicit_almacen=None):
     if ruta and ruta.almacen_embarque:
         return ruta.almacen_embarque
     return None
+
+
+def _idempotencia_error_response(exc):
+    return Response(
+        {
+            'detail': exc.detail,
+            'code': exc.code,
+        },
+        status=exc.http_status,
+    )
 
 class EmbarqueListCreateAPIView(APIView):
     """
@@ -132,25 +150,70 @@ class EmbarqueListCreateAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        request_hash = construir_request_hash(request.data)
+        try:
+            idempotency_key = resolver_idempotency_key(request, request_hash)
+            idempotencia = adquirir_operacion(
+                scope='EMBARQUE_CREAR',
+                entity_id=ruta.id if ruta else f'user-{request.user.id}',
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                user=request.user,
+            )
+        except IdempotenciaError as exc:
+            return _idempotencia_error_response(exc)
+
+        if idempotencia.replay:
+            return Response(
+                idempotencia.replay_payload,
+                status=idempotencia.replay_status or status.HTTP_200_OK
+            )
+
         try:
             with transaction.atomic():
                 embarque_data = serializer.save()
-                return Response({
+                response_payload = {
                     'success': True,
                     'embarque_id': embarque_data.id,
                     'fase': embarque_data.fase,
-                }, status=status.HTTP_201_CREATED)
+                    'idempotency_key': idempotency_key,
+                }
+                completar_operacion(
+                    operacion_id=idempotencia.operacion.id,
+                    response_payload=response_payload,
+                    http_status=status.HTTP_201_CREATED,
+                    user=request.user,
+                )
+                return Response(response_payload, status=status.HTTP_201_CREATED)
         except ValidationError as e:
+            fallar_operacion(
+                operacion_id=idempotencia.operacion.id,
+                error_message=str(e),
+                http_status=status.HTTP_400_BAD_REQUEST,
+                user=request.user,
+            )
             return Response(
-                {'detail': f'Error de validación: {str(e)}'},
+                {
+                    'detail': f'Error de validación: {str(e)}',
+                    'code': 'EMBARQUE_VALIDATION_ERROR',
+                },
                 status=status.HTTP_400_BAD_REQUEST
             )
         except Exception as e:
             import traceback
             print(f"❌ [EMBARQUE ERROR] {str(e)}")
             print(f"❌ [EMBARQUE TRACEBACK]\n{traceback.format_exc()}")
+            fallar_operacion(
+                operacion_id=idempotencia.operacion.id,
+                error_message=str(e),
+                http_status=status.HTTP_400_BAD_REQUEST,
+                user=request.user,
+            )
             return Response(
-                {'detail': f'Error interno: {str(e)}'},
+                {
+                    'detail': f'Error interno: {str(e)}',
+                    'code': 'EMBARQUE_CREATE_ERROR',
+                },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -716,6 +779,25 @@ def iniciar_reparto(request):
             {'detail': 'embarque_id es requerido'},
             status=status.HTTP_400_BAD_REQUEST
         )
+
+    request_hash = construir_request_hash(request.data)
+    try:
+        idempotency_key = resolver_idempotency_key(request, request_hash)
+        idempotencia = adquirir_operacion(
+            scope='EMBARQUE_INICIAR_REPARTO',
+            entity_id=embarque_id,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            user=request.user,
+        )
+    except IdempotenciaError as exc:
+        return _idempotencia_error_response(exc)
+
+    if idempotencia.replay:
+        return Response(
+            idempotencia.replay_payload,
+            status=idempotencia.replay_status or status.HTTP_200_OK
+        )
     
     try:
         embarque = EmbarqueReparto.objects.select_related('ruta').get(
@@ -725,8 +807,20 @@ def iniciar_reparto(request):
         
         # Validar que el embarque esté en fase PROGRAMADO (legacy CARGA).
         if embarque.fase not in EmbarqueReparto.fases_programado_compat():
+            fallar_operacion(
+                operacion_id=idempotencia.operacion.id,
+                error_message=(
+                    f'El embarque debe estar en fase PROGRAMADO para iniciar reparto. '
+                    f'Fase actual: {embarque.fase}'
+                ),
+                http_status=status.HTTP_400_BAD_REQUEST,
+                user=request.user,
+            )
             return Response(
-                {'detail': f'El embarque debe estar en fase PROGRAMADO para iniciar reparto. Fase actual: {embarque.fase}'},
+                {
+                    'detail': f'El embarque debe estar en fase PROGRAMADO para iniciar reparto. Fase actual: {embarque.fase}',
+                    'code': 'EMBARQUE_INVALID_PHASE',
+                },
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -757,7 +851,7 @@ def iniciar_reparto(request):
         if embarque.encargado:
             encargado_nombre = embarque.encargado.full_name() if callable(embarque.encargado.full_name) else embarque.encargado.full_name
         
-        return Response({
+        response_payload = {
             'success': True,
             'message': f'Reparto iniciado exitosamente para embarque {embarque_id}',
             'embarque_id': embarque.id,
@@ -765,16 +859,36 @@ def iniciar_reparto(request):
             'fecha_salida': embarque.fecha_salida.strftime('%Y-%m-%d %H:%M:%S'),
             'ruta_nombre': embarque.ruta.nombre if embarque.ruta else None,
             'encargado_nombre': encargado_nombre,
-        }, status=status.HTTP_200_OK)
+            'idempotency_key': idempotency_key,
+        }
+        completar_operacion(
+            operacion_id=idempotencia.operacion.id,
+            response_payload=response_payload,
+            http_status=status.HTTP_200_OK,
+            user=request.user,
+        )
+        return Response(response_payload, status=status.HTTP_200_OK)
         
     except EmbarqueReparto.DoesNotExist:
+        fallar_operacion(
+            operacion_id=idempotencia.operacion.id,
+            error_message='Embarque no encontrado',
+            http_status=status.HTTP_404_NOT_FOUND,
+            user=request.user,
+        )
         return Response(
-            {'detail': 'Embarque no encontrado'},
+            {'detail': 'Embarque no encontrado', 'code': 'EMBARQUE_NOT_FOUND'},
             status=status.HTTP_404_NOT_FOUND
         )
     except Exception as e:
+        fallar_operacion(
+            operacion_id=idempotencia.operacion.id,
+            error_message=str(e),
+            http_status=status.HTTP_400_BAD_REQUEST,
+            user=request.user,
+        )
         return Response(
-            {'detail': str(e), 'error_code': 'ERROR_INICIAR_REPARTO'},
+            {'detail': str(e), 'code': 'ERROR_INICIAR_REPARTO'},
             status=status.HTTP_400_BAD_REQUEST
         )
 
@@ -812,31 +926,75 @@ def finalizar_reparto(request):
             {'detail': 'reparto_id es requerido'},
             status=status.HTTP_400_BAD_REQUEST
         )
+
+    request_hash = construir_request_hash(request.data)
+    try:
+        idempotency_key = resolver_idempotency_key(request, request_hash)
+        idempotencia = adquirir_operacion(
+            scope='EMBARQUE_FINALIZAR_REPARTO',
+            entity_id=reparto_id,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            user=request.user,
+        )
+    except IdempotenciaError as exc:
+        return _idempotencia_error_response(exc)
+
+    if idempotencia.replay:
+        return Response(
+            idempotencia.replay_payload,
+            status=idempotencia.replay_status or status.HTTP_200_OK
+        )
+
     model_reparto = EmbarqueReparto.objects.filter(id=reparto_id).first()
     if not model_reparto:
+        fallar_operacion(
+            operacion_id=idempotencia.operacion.id,
+            error_message='Reparto no encontrado',
+            http_status=status.HTTP_404_NOT_FOUND,
+            user=request.user,
+        )
         return Response(
-            {'detail': 'Reparto no encontrado'},
+            {'detail': 'Reparto no encontrado', 'code': 'REPARTO_NOT_FOUND'},
             status=status.HTTP_404_NOT_FOUND
         )
         
     if model_reparto.fase != EmbarqueReparto.FASE_REPARTO:
+        fallar_operacion(
+            operacion_id=idempotencia.operacion.id,
+            error_message=(
+                f'El reparto debe estar en fase REPARTO para finalizar. '
+                f'Fase actual: {model_reparto.fase}'
+            ),
+            http_status=status.HTTP_400_BAD_REQUEST,
+            user=request.user,
+        )
         return Response(
-            {'detail': f'El reparto debe estar en fase REPARTO para finalizar. Fase actual: {model_reparto.fase}'},
+            {
+                'detail': f'El reparto debe estar en fase REPARTO para finalizar. Fase actual: {model_reparto.fase}',
+                'code': 'REPARTO_INVALID_PHASE',
+            },
             status=status.HTTP_400_BAD_REQUEST
         )
         
     model_reparto.fase = EmbarqueReparto.FASE_TERMINADO
     model_reparto.fecha_finalizada = timezone.now()
     model_reparto.save(update_fields=['fase', 'fecha_finalizada', 'updated_at'])
-    return Response(
-        {
-            'success': True,
-            'message': f'Reparto {reparto_id} finalizado exitosamente',
-            'reparto_id': model_reparto.id,
-            'fase': model_reparto.fase,
-        },
-        status=status.HTTP_200_OK
+
+    response_payload = {
+        'success': True,
+        'message': f'Reparto {reparto_id} finalizado exitosamente',
+        'reparto_id': model_reparto.id,
+        'fase': model_reparto.fase,
+        'idempotency_key': idempotency_key,
+    }
+    completar_operacion(
+        operacion_id=idempotencia.operacion.id,
+        response_payload=response_payload,
+        http_status=status.HTTP_200_OK,
+        user=request.user,
     )
+    return Response(response_payload, status=status.HTTP_200_OK)
 
 
 """
@@ -878,6 +1036,26 @@ def checkin_producto_embarque(request):
             {'detail': 'Datos inválidos', 'errors': serializer.errors},
             status=status.HTTP_400_BAD_REQUEST
         )
+
+    embarque_validado = serializer.validated_data.get('embarque')
+    request_hash = construir_request_hash(request.data)
+    try:
+        idempotency_key = resolver_idempotency_key(request, request_hash)
+        idempotencia = adquirir_operacion(
+            scope='EMBARQUE_CHECKIN',
+            entity_id=embarque_validado.id if embarque_validado else 'unknown',
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            user=request.user,
+        )
+    except IdempotenciaError as exc:
+        return _idempotencia_error_response(exc)
+
+    if idempotencia.replay:
+        return Response(
+            idempotencia.replay_payload,
+            status=idempotencia.replay_status or status.HTTP_200_OK
+        )
     
     try:
         with transaction.atomic():
@@ -887,8 +1065,17 @@ def checkin_producto_embarque(request):
             
             # Validar que el embarque esté en fase PROGRAMADO (legacy CARGA).
             if embarque.fase not in EmbarqueReparto.fases_programado_compat():
+                fallar_operacion(
+                    operacion_id=idempotencia.operacion.id,
+                    error_message=f'El embarque debe estar en fase PROGRAMADO. Fase actual: {embarque.fase}',
+                    http_status=status.HTTP_400_BAD_REQUEST,
+                    user=request.user,
+                )
                 return Response(
-                    {'detail': f'El embarque debe estar en fase PROGRAMADO. Fase actual: {embarque.fase}'},
+                    {
+                        'detail': f'El embarque debe estar en fase PROGRAMADO. Fase actual: {embarque.fase}',
+                        'code': 'EMBARQUE_INVALID_PHASE',
+                    },
                     status=status.HTTP_400_BAD_REQUEST
                 )
                 
@@ -954,18 +1141,32 @@ def checkin_producto_embarque(request):
             embarque.fecha_salida = timezone.now()
             embarque.save()
             
-            return Response({
+            response_payload = {
                 'success': True,
                 'message': f'Checkin realizado exitosamente',
                 'embarque_id': embarque.id,
                 'ventas_procesadas': ventas_procesadas,
                 'productos_checkin': productos_checkin_count,
                 'productos_tara_checkin': tara_checkin_count,
-            }, status=status.HTTP_200_OK)
+                'idempotency_key': idempotency_key,
+            }
+            completar_operacion(
+                operacion_id=idempotencia.operacion.id,
+                response_payload=response_payload,
+                http_status=status.HTTP_200_OK,
+                user=request.user,
+            )
+            return Response(response_payload, status=status.HTTP_200_OK)
             
     except Exception as e:
+        fallar_operacion(
+            operacion_id=idempotencia.operacion.id,
+            error_message=str(e),
+            http_status=status.HTTP_400_BAD_REQUEST,
+            user=request.user,
+        )
         return Response(
-            {'detail': f'Error al realizar checkin: {str(e)}'},
+            {'detail': f'Error al realizar checkin: {str(e)}', 'code': 'EMBARQUE_CHECKIN_ERROR'},
             status=status.HTTP_400_BAD_REQUEST
         )
 

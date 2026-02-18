@@ -5,6 +5,7 @@ from rest_framework.decorators import action
 from apps.usuarios.models import Usuario
 from apps.usuarios.serializers.usuarios import UsuarioSerializer, UsuarioMiniSerializer,UsuarioListSerializer,MiDataResponseSerializer 
 from apps.base.serachFilter import MinimalSearchFilter
+from apps.erp.models import Rutas
 
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiTypes,OpenApiResponse,OpenApiExample
 class UsuarioViewSet(viewsets.ModelViewSet):
@@ -119,6 +120,12 @@ class DetalleUsuario(generics.RetrieveAPIView):
     def retrieve(self, request, *args, **kwargs):
         usuario = self.get_object()
         permisos = usuario.get_all_permissions()
+        ruta_asignada = (
+            Rutas.objects
+            .filter(asignado=usuario, status_model='ACTIVE')
+            .order_by('-id')
+            .first()
+        )
 
         data = {
             'username': usuario.username,
@@ -131,6 +138,9 @@ class DetalleUsuario(generics.RetrieveAPIView):
             'caja_abierta': True if usuario.get_mi_caja() is not None else False,
             'mi_almacen_nombre': usuario.almacen.nombre if usuario.almacen else '',
             'mi_almacen_id' : usuario.almacen.id if usuario.almacen else None,
+            'ruta_asignada_id': ruta_asignada.id if ruta_asignada else None,
+            'ruta_asignada_codigo': ruta_asignada.codigo if ruta_asignada else '',
+            'ruta_asignada_nombre': ruta_asignada.nombre if ruta_asignada else '',
         }
         serializer = self.get_serializer(data)
         return Response(serializer.data)

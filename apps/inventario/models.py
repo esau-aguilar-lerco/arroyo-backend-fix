@@ -474,7 +474,38 @@ class SolicitudTraspasoDetalle(models.Model):
     solicitud = models.ForeignKey(SolicitudTraspaso, on_delete=models.CASCADE, related_name='detalles')
     producto = models.ForeignKey(Producto, on_delete=models.SET_NULL, null=True, blank=True)
     cantidad = models.DecimalField(max_digits=20, decimal_places=5, default=0)
-    
+
+
+class OperacionIdempotente(BaseModel):
+    """Registro de idempotencia para operaciones críticas de inventario/reparto."""
+    ESTADO_IN_PROGRESS = 'IN_PROGRESS'
+    ESTADO_COMPLETED = 'COMPLETED'
+    ESTADO_FAILED = 'FAILED'
+    ESTADOS = [
+        (ESTADO_IN_PROGRESS, ESTADO_IN_PROGRESS),
+        (ESTADO_COMPLETED, ESTADO_COMPLETED),
+        (ESTADO_FAILED, ESTADO_FAILED),
+    ]
+
+    scope = models.CharField(max_length=80, db_index=True)
+    entity_id = models.CharField(max_length=80, db_index=True)
+    idempotency_key = models.CharField(max_length=120)
+    request_hash = models.CharField(max_length=64, db_index=True)
+    estado = models.CharField(max_length=20, choices=ESTADOS, default=ESTADO_IN_PROGRESS, db_index=True)
+    response_payload = models.JSONField(null=True, blank=True)
+    http_status = models.PositiveIntegerField(null=True, blank=True)
+    error_message = models.TextField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Operación Idempotente"
+        verbose_name_plural = "Operaciones Idempotentes"
+        constraints = [
+            models.UniqueConstraint(
+                fields=['scope', 'entity_id', 'idempotency_key'],
+                name='uniq_idempotencia_scope_entity_key',
+            )
+        ]
 
 
 
