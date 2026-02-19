@@ -50,6 +50,25 @@ def _resolve_ruta_from_payload(payload):
     )
 
 
+def _resolve_ruta_for_user(request, payload):
+    """
+    Para usuarios operativos de ruta, evita inconsistencias del front:
+    siempre usa su ruta asignada activa y no la ruta enviada en payload.
+    """
+    user = request.user
+    if user and user.is_authenticated and not user.is_superuser and not user.is_staff:
+        ruta_usuario = (
+            Rutas.objects
+            .select_related('asignado__almacen', 'almacen_embarque')
+            .filter(asignado=user, status_model=BaseModel.STATUS_MODEL_ACTIVE)
+            .order_by('-id')
+            .first()
+        )
+        if ruta_usuario:
+            return ruta_usuario
+    return _resolve_ruta_from_payload(payload)
+
+
 def _get_almacen_origen_carga(ruta=None, user=None, explicit_almacen=None):
     if explicit_almacen:
         return explicit_almacen
@@ -129,10 +148,12 @@ class EmbarqueListCreateAPIView(APIView):
         Crear un nuevo embarque procesando preventas y productos en tara
         """
         from apps.inventario.models import Almacen
+        payload = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        ruta = _resolve_ruta_for_user(request, payload)
+        if ruta:
+            payload['ruta'] = ruta.id
 
-        ruta = _resolve_ruta_from_payload(request.data)
-
-        explicit_almacen = request.data.get('almacen_origen', None)
+        explicit_almacen = payload.get('almacen_origen', None)
         if explicit_almacen:
             # Si viene un ID, convertirlo a instancia
             if isinstance(explicit_almacen, int) or (isinstance(explicit_almacen, str) and explicit_almacen.isdigit()):
@@ -156,7 +177,7 @@ class EmbarqueListCreateAPIView(APIView):
             )
 
         serializer = EmbarqueSerializer(
-            data=request.data,
+            data=payload,
             context={'request': request, 'almacen_origen': almacen_origen}
         )
 
@@ -166,7 +187,7 @@ class EmbarqueListCreateAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        request_hash = construir_request_hash(request.data)
+        request_hash = construir_request_hash(payload)
         try:
             idempotency_key = resolver_idempotency_key(request, request_hash)
             idempotencia = adquirir_operacion(

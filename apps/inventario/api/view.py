@@ -69,6 +69,48 @@ def _puede_ver_costos(user):
     return any(any(marker in nombre for marker in marcadores_gerencia) for nombre in grupos)
 
 
+def _to_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "si", "sí"}
+
+
+def _resolver_almacen_consulta_default(request, prefer_concentrado=False):
+    """
+    Resuelve el almacén por defecto para consultas de inventario.
+    - Flujo normal: almacén del usuario -> almacén por encargado.
+    - Flujo Carga/Tara: prioriza CONCENTRADO DE RUTAS.
+    """
+    if prefer_concentrado:
+        concentrado = Almacen.objects.filter(
+            nombre__iexact='CONCENTRADO DE RUTAS',
+            status_model=BaseModel.STATUS_MODEL_ACTIVE
+        ).first()
+        if concentrado:
+            return concentrado
+
+    almacen = getattr(request.user, 'almacen', None)
+    if almacen:
+        return almacen
+
+    almacen = Almacen.objects.filter(
+        encargado=request.user,
+        status_model=BaseModel.STATUS_MODEL_ACTIVE
+    ).first()
+    if almacen:
+        return almacen
+
+    if not prefer_concentrado:
+        return Almacen.objects.filter(
+            nombre__iexact='CONCENTRADO DE RUTAS',
+            status_model=BaseModel.STATUS_MODEL_ACTIVE
+        ).first()
+
+    return None
+
+
 """
 ===================================================================
                 VIEWS SET DE PISOS - OPTIMIZADO
@@ -887,6 +929,13 @@ class HistoricoMovimientosDiarioAPIView(APIView):
             description="Incluir detalles de lotes individuales"
         ),
         OpenApiParameter(
+            name="prefer_concentrado",
+            type=bool,
+            location=OpenApiParameter.QUERY,
+            required=False,
+            description="Si es true y no se envía almacen_id, fuerza consulta contra CONCENTRADO DE RUTAS"
+        ),
+        OpenApiParameter(
             name="include_tipos",
             type=str,
             location=OpenApiParameter.QUERY,
@@ -902,6 +951,7 @@ class InventarioAlmacenAPIView(APIView):
         producto_id = request.query_params.get('producto_id')
         search = request.query_params.get('search', '').strip()
         incluir_lotes = request.query_params.get('incluir_lotes', 'false').lower() == 'true'
+        prefer_concentrado = _to_bool(request.query_params.get('prefer_concentrado'), default=False)
         puede_ver_costos = _puede_ver_costos(request.user)
 
         # Validación de parámetros
@@ -910,14 +960,19 @@ class InventarioAlmacenAPIView(APIView):
 
         # Obtener almacén si no se proporciona
         if not almacen_id:
-            almacen = request.user.almacen
+            # Auto-regla para Carga de Ruta / Tara Abierta:
+            # cuando consultan un producto puntual sin lotes y sin almacén explícito,
+            # priorizamos CONCENTRADO DE RUTAS para no depender del almacén del usuario.
+            auto_prefer_concentrado = bool(producto_id) and not incluir_lotes and not search
+            almacen = _resolver_almacen_consulta_default(
+                request,
+                prefer_concentrado=(prefer_concentrado or auto_prefer_concentrado)
+            )
             if not almacen:
-                almacen = Almacen.objects.filter(encargado=request.user).first()
-                if not almacen:
-                    return Response(
-                        {'detail': 'El parámetro almacen_id es requerido'},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
+                return Response(
+                    {'detail': 'El parámetro almacen_id es requerido'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             almacen_id = almacen.id
         else:
             almacen = Almacen.objects.filter(id=almacen_id).first()
