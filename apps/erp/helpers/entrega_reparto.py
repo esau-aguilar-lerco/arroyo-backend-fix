@@ -1,6 +1,7 @@
 from decimal import Decimal
 
-from apps.erp.models import Venta, VentaDetalle, incidencia, IncidenciaLote
+from apps.base.models import BaseModel
+from apps.erp.models import Venta, VentaDetalle, incidencia, IncidenciaLote, Rutas
 from apps.inventario.models import EmbarqueReparto, LoteInventario, MovimientoInventario, ProductosMovimiento
 
 
@@ -21,9 +22,15 @@ def registrar_entrega_productos(venta: Venta, productos_entregados: list, usuari
         raise ValueError(f"La venta {venta.codigo} no tiene ruta asignada.")
 
     ruta = venta.ruta
-    responsable_ruta_id = ruta.asignado_id
-    if usuario and responsable_ruta_id and usuario.id != responsable_ruta_id:
-        raise ValueError("Solo el responsable de la ruta puede confirmar entregas.")
+    usuario_en_ruta = True
+    if usuario and not usuario.is_superuser and not usuario.is_staff:
+        usuario_en_ruta = Rutas.objects.filter(
+            id=ruta.id,
+            asignado=usuario,
+            status_model=BaseModel.STATUS_MODEL_ACTIVE,
+        ).exists()
+        if not usuario_en_ruta:
+            raise ValueError("Solo un usuario asignado a esta ruta puede confirmar entregas.")
 
     almacen_pedido = ruta.almacen_embarque
     almacen_tara_abierta = ruta.almacen
@@ -38,9 +45,6 @@ def registrar_entrega_productos(venta: Venta, productos_entregados: list, usuari
     )
     if not embarque:
         raise ValueError(f"No se encontró un embarque relacionado para la venta {venta.codigo}.")
-
-    if embarque.encargado_id and usuario and embarque.encargado_id != usuario.id:
-        raise ValueError("El usuario actual no coincide con el encargado del embarque.")
 
     detalles_venta = {
         detalle.producto_id: detalle

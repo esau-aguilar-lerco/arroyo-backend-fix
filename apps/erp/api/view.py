@@ -930,17 +930,30 @@ class AlmacenMiniViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     Query Parameters:
         is_cedis (bool, optional): Filtra los almacenes por el campo 'is_cedis'.
             Ejemplo: ?is_cedis=true o ?is_cedis=false
+        scope (str, optional): Alcance preconfigurado para el listado.
+            - global: FIJO + RUTA + EMBARQUE + INCIDENCIAS
+            - operativo: comportamiento legacy (FIJO + RUTA + INCIDENCIAS)
+        include_tipos (str, optional): Lista CSV de tipos explícitos.
+            Ejemplo: ?include_tipos=FIJO,RUTA,EMBARQUE
 
     Excludes objects with status_model set to BaseModel.STATUS_MODEL_DELETE.
     Pagination is disabled for this viewset.
     """
-    queryset = Almacen.objects.all().filter(status_model__in=[BaseModel.STATUS_MODEL_ACTIVE, BaseModel.STATUS_MODEL_INACTIVE], tipo__in=[Almacen.TIPO_FIJO, Almacen.TIPO_RUTA, Almacen.TIPO_INCIDENCIAS]).order_by('nombre')
+    queryset = Almacen.objects.all().filter(
+        status_model__in=[BaseModel.STATUS_MODEL_ACTIVE, BaseModel.STATUS_MODEL_INACTIVE]
+    ).order_by('nombre')
     serializer_class = AlmacenMiniSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = None
     filter_backends = [MinimalSearchFilter]
 
     search_fields = ['codigo', 'nombre', 'id']
+    TIPOS_ALIAS = {
+        'FIJO': Almacen.TIPO_FIJO,
+        'RUTA': Almacen.TIPO_RUTA,
+        'EMBARQUE': Almacen.TIPO_EMBARQUE,
+        'INCIDENCIAS': Almacen.TIPO_INCIDENCIAS,
+    }
 
     @property
     def is_cedis(self):
@@ -956,11 +969,51 @@ class AlmacenMiniViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
                 return False
         return None
 
+    @property
+    def scope(self):
+        return (self.request.query_params.get('scope') or '').strip().lower()
+
+    @property
+    def include_tipos(self):
+        raw = (self.request.query_params.get('include_tipos') or '').strip()
+        if not raw:
+            return []
+        tipos = []
+        for item in [x.strip().upper() for x in raw.split(',') if x.strip()]:
+            tipo_real = self.TIPOS_ALIAS.get(item)
+            if tipo_real:
+                tipos.append(tipo_real)
+        return list(dict.fromkeys(tipos))
+
     def get_queryset(self):
         queryset = super().get_queryset().exclude(status_model=BaseModel.STATUS_MODEL_DELETE)
-        is_cedis = self.is_cedis
-        if is_cedis is not None:
-            queryset = queryset.filter(is_cedis=is_cedis)
+        scope = self.scope
+        include_tipos = self.include_tipos
+
+        if include_tipos:
+            queryset = queryset.filter(tipo__in=include_tipos)
+        elif scope in ['global', 'all']:
+            queryset = queryset.filter(
+                tipo__in=[
+                    Almacen.TIPO_FIJO,
+                    Almacen.TIPO_RUTA,
+                    Almacen.TIPO_EMBARQUE,
+                    Almacen.TIPO_INCIDENCIAS,
+                ]
+            )
+        else:
+            # Compatibilidad legacy: listado operativo clásico.
+            queryset = queryset.filter(
+                tipo__in=[
+                    Almacen.TIPO_FIJO,
+                    Almacen.TIPO_RUTA,
+                    Almacen.TIPO_INCIDENCIAS,
+                ]
+            )
+            is_cedis = self.is_cedis
+            if is_cedis is not None:
+                queryset = queryset.filter(is_cedis=is_cedis)
+
         return queryset
 """
 ============================================================================================

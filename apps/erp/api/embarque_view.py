@@ -5,6 +5,7 @@ from rest_framework.decorators import api_view, permission_classes
 from django.db import transaction
 from django.db.models import Sum
 from django.core.exceptions import ValidationError
+from collections import defaultdict
 
 from drf_spectacular.utils import extend_schema, inline_serializer, OpenApiParameter, OpenApiExample
 from drf_spectacular.types import OpenApiTypes
@@ -892,6 +893,38 @@ def iniciar_reparto(request):
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+        reparto_activo_misma_ruta = (
+            EmbarqueReparto.objects
+            .filter(
+                status_model=BaseModel.STATUS_MODEL_ACTIVE,
+                ruta_id=embarque.ruta_id,
+                fase=EmbarqueReparto.FASE_REPARTO,
+            )
+            .exclude(id=embarque.id)
+            .order_by('-id')
+            .first()
+        )
+        if reparto_activo_misma_ruta:
+            _safe_fallar_operacion(
+                operacion_id=idempotencia.operacion.id,
+                error_message=(
+                    f'La ruta {embarque.ruta.codigo if embarque.ruta else embarque.ruta_id} '
+                    f'ya tiene un reparto activo (ID {reparto_activo_misma_ruta.id}).'
+                ),
+                http_status=status.HTTP_400_BAD_REQUEST,
+                user=request.user,
+            )
+            return Response(
+                {
+                    'detail': (
+                        f'La ruta {embarque.ruta.codigo if embarque.ruta else embarque.ruta_id} '
+                        f'ya tiene un reparto activo (ID {reparto_activo_misma_ruta.id}).'
+                    ),
+                    'code': 'REPARTO_ALREADY_ACTIVE_FOR_ROUTE',
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
         # Actualizar fase y fecha de salida
         embarque.fase = EmbarqueReparto.FASE_REPARTO
@@ -1461,6 +1494,57 @@ def listado_pedidos_usuario_reparto(request):
                 continue
             productos_por_venta.setdefault(prod_emb.preventa_id, []).append(prod_emb)
 
+        inventario_pedido = defaultdict(dict)
+        inventario_tara = defaultdict(dict)
+        productos_tara_detalle = []
+
+        for prod_emb in embarque.productos.all():
+            if not prod_emb.producto_id:
+                continue
+
+            bucket = inventario_tara if prod_emb.tipo == ProductoEmbarque.TARA else inventario_pedido
+            if not bucket[prod_emb.producto_id]:
+                bucket[prod_emb.producto_id] = {
+                    'producto_id': prod_emb.producto_id,
+                    'producto_codigo': prod_emb.producto.codigo if prod_emb.producto else None,
+                    'producto_nombre': prod_emb.producto.nombre if prod_emb.producto else None,
+                    'unidad_medida': (
+                        prod_emb.producto.unidad_sat.nombre
+                        if prod_emb.producto and prod_emb.producto.unidad_sat
+                        else None
+                    ),
+                    'unidad_clave': (
+                        prod_emb.producto.unidad_sat.clave
+                        if prod_emb.producto and prod_emb.producto.unidad_sat
+                        else None
+                    ),
+                    'cantidad': Decimal('0.000'),
+                    'tipo': prod_emb.tipo,
+                }
+
+            bucket[prod_emb.producto_id]['cantidad'] += Decimal(str(prod_emb.cantidad or 0))
+
+            if prod_emb.tipo == ProductoEmbarque.TARA:
+                productos_tara_detalle.append({
+                    'id': prod_emb.id,
+                    'producto_id': prod_emb.producto_id,
+                    'producto_codigo': prod_emb.producto.codigo if prod_emb.producto else None,
+                    'producto_nombre': prod_emb.producto.nombre if prod_emb.producto else None,
+                    'unidad_medida': (
+                        prod_emb.producto.unidad_sat.nombre
+                        if prod_emb.producto and prod_emb.producto.unidad_sat
+                        else None
+                    ),
+                    'unidad_clave': (
+                        prod_emb.producto.unidad_sat.clave
+                        if prod_emb.producto and prod_emb.producto.unidad_sat
+                        else None
+                    ),
+                    'cantidad': prod_emb.cantidad,
+                    'precio_unitario': prod_emb.precio_unitario,
+                    'is_cargado': prod_emb.is_cargado,
+                })
+
         ventas_data = []
         for venta in embarque.ventas.all().order_by('-created_at'):
             detalles_venta_map = {d.producto_id: d for d in venta.detalles.all()}
@@ -1538,6 +1622,15 @@ def listado_pedidos_usuario_reparto(request):
                 'detalles': detalles_data,
             })
 
+        productos_pedido_inventario = sorted(
+            inventario_pedido.values(),
+            key=lambda x: (x.get('producto_nombre') or '')
+        )
+        productos_tara_inventario = sorted(
+            inventario_tara.values(),
+            key=lambda x: (x.get('producto_nombre') or '')
+        )
+
         return Response({
             'embarque': {
                 'id': embarque.id,
@@ -1552,6 +1645,17 @@ def listado_pedidos_usuario_reparto(request):
             },
             'ventas': ventas_data,
             'total_ventas': len(ventas_data),
+            'productos_tara': productos_tara_detalle,
+            'inventario_reparto': {
+                'productos_pedido': productos_pedido_inventario,
+                'productos_tara': productos_tara_inventario,
+                'totales': {
+                    'lineas_pedido': len(productos_pedido_inventario),
+                    'lineas_tara': len(productos_tara_inventario),
+                    'cantidad_total_pedido': sum((item['cantidad'] for item in productos_pedido_inventario), Decimal('0.000')),
+                    'cantidad_total_tara': sum((item['cantidad'] for item in productos_tara_inventario), Decimal('0.000')),
+                }
+            }
         }, status=status.HTTP_200_OK)
 
     except Exception as e:

@@ -1362,6 +1362,20 @@ class InventarioAlmacenConsultaAPIView(APIView):
             location=OpenApiParameter.QUERY,
             required=False,
             description="Incluir detalles de lotes individuales"
+        ),
+        OpenApiParameter(
+            name="include_tipos",
+            type=str,
+            location=OpenApiParameter.QUERY,
+            required=False,
+            description="CSV de tipos de almacén a incluir (ej: FIJO,RUTA,EMBARQUE,INCIDENCIAS)"
+        ),
+        OpenApiParameter(
+            name="scope",
+            type=str,
+            location=OpenApiParameter.QUERY,
+            required=False,
+            description="global/all para consulta global (incluye FIJO,RUTA,EMBARQUE,INCIDENCIAS) cuando no se envía include_tipos"
         )
     ],
     responses={200: DetalleInventarioPorProductoSerializer}
@@ -1376,6 +1390,7 @@ class InventarioProductoAPIView(APIView):
         producto_id = request.query_params.get('producto_id')
         almacen_id = request.query_params.get('almacen_id')
         include_tipos = request.query_params.get('include_tipos', '')
+        scope = (request.query_params.get('scope') or '').strip().lower()
         incluir_lotes = True#request.query_params.get('incluir_lotes', 'false').lower() == 'true'
         
         if not producto_id:
@@ -1415,6 +1430,13 @@ class InventarioProductoAPIView(APIView):
                     )
                 tipos_incluidos.append(tipo_real)
             tipos_incluidos = list(dict.fromkeys(tipos_incluidos))
+        elif scope in ['global', 'all']:
+            tipos_incluidos = [
+                Almacen.TIPO_FIJO,
+                Almacen.TIPO_RUTA,
+                Almacen.TIPO_EMBARQUE,
+                Almacen.TIPO_INCIDENCIAS,
+            ]
 
         # ========== PASO 1: OBTENER TODOS LOS ALMACENES FIJOS ==========
         almacenes_query = Almacen.objects.filter(
