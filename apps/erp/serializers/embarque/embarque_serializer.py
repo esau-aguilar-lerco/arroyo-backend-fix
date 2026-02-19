@@ -3,6 +3,7 @@ from apps.erp.models import Venta, Almacen, Rutas, Producto, CajaApertura, CajaT
 from apps.erp.models import VentaDetalle
 from apps.inventario.models import LoteInventario, EmbarqueReparto, ProductoEmbarque
 from apps.base.serializer import FlexiblePKRelatedField, SerializerRelatedField
+from apps.base.models import BaseModel
 from django.db.models import Sum
 from decimal import Decimal, InvalidOperation
 
@@ -227,7 +228,25 @@ class EmbarqueSerializer(serializers.Serializer):
         ruta = validated_data.get('ruta')
         pedidos = validated_data.get('pedidos', [])
         productos_tara = validated_data.get('productos_tara', [])
-        
+
+        embarque_abierto = (
+            EmbarqueReparto.objects
+            .filter(
+                ruta=ruta,
+                status_model=BaseModel.STATUS_MODEL_ACTIVE,
+                fase__in=[
+                    *EmbarqueReparto.fases_programado_compat(),
+                    EmbarqueReparto.FASE_REPARTO,
+                ],
+            )
+            .order_by('-id')
+            .first()
+        )
+        if embarque_abierto:
+            raise serializers.ValidationError(
+                f"La ruta {ruta.codigo if ruta else ''} ya tiene un embarque abierto "
+                f"(ID {embarque_abierto.id}, fase {embarque_abierto.fase})."
+            )
 
         #print("Crear embarque con datos:", ruta, embarque_rutas_list, productos_tara)
         model_embarque = crear_movimiento_inventario_almacen_embarque(ruta=ruta, pedidos=pedidos, productos_tara=productos_tara, usuario=None,almacen_origen=almacen_origen)

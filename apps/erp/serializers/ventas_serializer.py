@@ -356,8 +356,32 @@ class VentaSerializer(BaseSerializer):
         detalles_data = validated_data.pop('detalles', [])
         pagos_data = validated_data.pop('pagos', [])  
         vendedor = validated_data.get('vendedor', None)
+        fase_venta = validated_data.get('fase')
         almacen = validated_data.get('almacen')
-        if validated_data.get('fase') in [Venta.FASE_VENTA_COMANDA, Venta.FASE_TERMINADA] and not almacen:
+
+        # Si el usuario está asignado a una ruta, la venta debe afectar siempre
+        # el almacén de esa ruta (tara abierta), ignorando el almacén enviado.
+        ruta_usuario = None
+        if request and hasattr(request, 'user') and request.user.is_authenticated:
+            ruta_usuario = (
+                Rutas.objects
+                .select_related('almacen')
+                .filter(
+                    asignado=request.user,
+                    status_model=BaseModel.STATUS_MODEL_ACTIVE
+                )
+                .first()
+            )
+
+        if (
+            ruta_usuario
+            and fase_venta in [Venta.FASE_VENTA_COMANDA, Venta.FASE_TERMINADA, Venta.FASE_EN_PROCESO]
+            and ruta_usuario.almacen
+        ):
+            validated_data['almacen'] = ruta_usuario.almacen
+            almacen = ruta_usuario.almacen
+
+        if fase_venta in [Venta.FASE_VENTA_COMANDA, Venta.FASE_TERMINADA] and not almacen:
             almacen = getattr(request.user, 'almacen', None) if request else None
             if not almacen:
                 almacen = vendedor.almacen if vendedor and vendedor.almacen else None

@@ -301,7 +301,8 @@ def listar_preventas_con_detalles_carga(request):
         ruta_id = request.query_params.get('ruta_id')
         fase = request.query_params.get('fase', Venta.FASE_PRE_VENTA)
         fase_normalizada = (fase or '').strip().upper()
-        if fase_normalizada in ['PROGRAMADO', EmbarqueReparto.FASE_CARGA_LEGACY]:
+        modo_programado = fase_normalizada in ['PROGRAMADO', EmbarqueReparto.FASE_CARGA_LEGACY]
+        if modo_programado:
             fase = Venta.FASE_PRE_VENTA
         solo_productos = request.query_params.get('solo_productos', '').lower() == 'true'
         user = request.user
@@ -310,9 +311,7 @@ def listar_preventas_con_detalles_carga(request):
         # Construir filtros base
         filtros = {
             'status_model': BaseModel.STATUS_MODEL_ACTIVE,
-            'fase': fase,
             'was_preventa': True,
-            'is_total_cargado': False,
         }
         
         if not ruta_id:
@@ -356,6 +355,27 @@ def listar_preventas_con_detalles_carga(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
+        if modo_programado:
+            embarque_programado = (
+                EmbarqueReparto.objects
+                .filter(
+                    status_model=BaseModel.STATUS_MODEL_ACTIVE,
+                    ruta_id=ruta.id,
+                    fase__in=EmbarqueReparto.fases_programado_compat(),
+                )
+                .order_by('-id')
+                .first()
+            )
+            if not embarque_programado:
+                return Response({'preventas': []}, status=status.HTTP_200_OK)
+
+            filtros['id__in'] = embarque_programado.ventas.values_list('id', flat=True)
+        else:
+            filtros.update({
+                'fase': fase,
+                'is_total_cargado': False,
+            })
+
         # Query optimizada
         preventas = Venta.objects.filter(
             **filtros
@@ -404,7 +424,12 @@ def listar_preventas_con_detalles_carga(request):
         preventas_data = []
 
         for preventa in preventas:
-            detalles = preventa.detalles.filter(is_cargado=False)
+            if modo_programado:
+                detalles = preventa.detalles.filter(cantidad_logistica__gt=0)
+                if not detalles.exists():
+                    detalles = preventa.detalles.all()
+            else:
+                detalles = preventa.detalles.filter(is_cargado=False)
             
             if not detalles:
                 continue
@@ -420,24 +445,29 @@ def listar_preventas_con_detalles_carga(request):
                     or almacen_pedidos
                 )
 
+                cantidad_programada = detalle.cantidad_logistica if (detalle.cantidad_logistica or 0) > 0 else detalle.cantidad
+                cantidad_cargada = detalle.cantidad_cargada
+                if modo_programado and (cantidad_cargada is None or cantidad_cargada <= 0):
+                    cantidad_cargada = cantidad_programada
+
                 productos_data.append({
                     'producto_id': producto_id,
                     'nombre': detalle.producto.nombre,
                     'codigo': detalle.producto.codigo,
                     'unidad': detalle.producto.unidad_sat.nombre if detalle.producto.unidad_sat else 'N/A',
                     'unidad_clave': detalle.producto.unidad_sat.clave if detalle.producto.unidad_sat else 'N/A',
-                    'cantidad': detalle.cantidad,
-                    'cantidad_total': detalle.cantidad,
+                    'cantidad': cantidad_programada if modo_programado else detalle.cantidad,
+                    'cantidad_total': cantidad_programada if modo_programado else detalle.cantidad,
                     'precio_unitario': detalle.precio_unitario,
-                    'cantidad_cargada': detalle.cantidad_cargada,
+                    'cantidad_cargada': cantidad_cargada,
                     'cantidad_entregada': detalle.cantidad_entregada,
-                    'cantidad_logistica': detalle.cantidad_logistica,
+                    'cantidad_logistica': cantidad_programada if modo_programado else detalle.cantidad_logistica,
                     'cantidad_inventario': LoteInventario.objects.filter(
                         producto_id=producto_id,
                         almacen=almacen_inventario,
                         status_model=BaseModel.STATUS_MODEL_ACTIVE
                     ).aggregate(total_cantidad=Sum('cantidad'))['total_cantidad'] or 0.0,
-                    'is_cargado': detalle.is_cargado,
+                    'is_cargado': True if modo_programado else detalle.is_cargado,
                     #'lotes': lotes_por_producto.get(producto_id, []),
                 })
             
@@ -461,7 +491,7 @@ def listar_preventas_con_detalles_carga(request):
                 'ruta_id': preventa.ruta.id if preventa.ruta else None,
                 'ruta_nombre': preventa.ruta.nombre if preventa.ruta else 'Sin ruta',
                 'ruta_codigo': preventa.ruta.codigo if preventa.ruta else 'Sin código',
-                'estatus_pedido': 'PROGRAMADO' if not preventa.is_total_cargado else 'CARGADO',
+                'estatus_pedido': 'PROGRAMADO' if modo_programado else ('PROGRAMADO' if not preventa.is_total_cargado else 'CARGADO'),
                 'productos': productos_data,
             }
             
@@ -487,7 +517,7 @@ def listar_preventas_con_detalles_carga(request):
 ============================================================================================
 """
 from rest_framework.pagination import LimitOffsetPagination
-from apps.inventario.models import EmbarqueReparto
+from apps.inventario.models import EmbarqueReparto, ProductoEmbarque
 from apps.erp.serializers.embarque.embarque_serializer import EmbarqueDetailSerializer
 
 
@@ -573,6 +603,8 @@ class EmbarqueRepartoListRetrieveAPIView(APIView):
         encargado_id = request.query_params.get('encargado_id', None)
         sin_paginacion = request.query_params.get('sin_paginacion', '').lower() == 'true'
         
+        ruta_usuario = None
+
         # Query base optimizada
         queryset = EmbarqueReparto.objects.select_related(
             'ruta',
@@ -583,13 +615,15 @@ class EmbarqueRepartoListRetrieveAPIView(APIView):
         
         # Búsqueda por nombre de ruta o encargado
         if search:
-            queryset = queryset.filter(
-                Q(ruta__nombre__icontains=search) |
-                Q(ruta__codigo__icontains=search) |
-                Q(encargado__nombre__icontains=search) |
-                Q(encargado__apellido_paterno__icontains=search) |
-                Q(encargado__apellido_materno__icontains=search)
-            )
+            for termino in [t for t in search.split() if t]:
+                queryset = queryset.filter(
+                    Q(ruta__nombre__icontains=termino) |
+                    Q(ruta__codigo__icontains=termino) |
+                    Q(encargado__username__icontains=termino) |
+                    Q(encargado__nombre__icontains=termino) |
+                    Q(encargado__apellido_paterno__icontains=termino) |
+                    Q(encargado__apellido_materno__icontains=termino)
+                )
         
         # Aplicar filtros
         if ruta_id:
@@ -597,38 +631,17 @@ class EmbarqueRepartoListRetrieveAPIView(APIView):
         else:
             # Filtrar por la ruta del usuario si no se proporciona ruta_id
             user = request.user
-            ruta = Rutas.objects.filter(asignado=user, status_model=BaseModel.STATUS_MODEL_ACTIVE).first()
-            if ruta:
-                queryset = queryset.filter(ruta_id=ruta.id)
+            ruta_usuario = Rutas.objects.filter(asignado=user, status_model=BaseModel.STATUS_MODEL_ACTIVE).first()
+            if ruta_usuario:
+                queryset = queryset.filter(ruta_id=ruta_usuario.id)
                 
                 
         if fase:
-            from django.db.models import Max
             fase_normalizada = (fase or '').strip().upper()
             if fase_normalizada == EmbarqueReparto.FASE_CARGA_LEGACY:
                 fase_normalizada = EmbarqueReparto.FASE_PROGRAMADO
 
-            # Compatibilidad para Lista de Embarque del front actual:
-            # cuando envía fase=PROGRAMADO (o legacy CARGA) en modo sin paginación, también se
-            # incluyen rutas ya en REPARTO y se devuelve el embarque más reciente por ruta.
-            if (
-                sin_paginacion
-                and not ruta_id
-                and fase_normalizada == EmbarqueReparto.FASE_PROGRAMADO
-            ):
-                queryset = queryset.filter(
-                    fase__in=[
-                        *EmbarqueReparto.fases_programado_compat(),
-                        EmbarqueReparto.FASE_REPARTO,
-                    ]
-                )
-                latest_ids = (
-                    queryset.values('ruta_id')
-                    .annotate(last_id=Max('id'))
-                    .values_list('last_id', flat=True)
-                )
-                queryset = queryset.filter(id__in=latest_ids)
-            elif ',' in fase_normalizada:
+            if ',' in fase_normalizada:
                 fases = [f.strip().upper() for f in fase_normalizada.split(',') if f.strip()]
                 fases_normalizadas = []
                 for fase_item in fases:
@@ -645,6 +658,17 @@ class EmbarqueRepartoListRetrieveAPIView(APIView):
                     queryset = queryset.filter(fase__in=EmbarqueReparto.fases_programado_compat())
                 else:
                     queryset = queryset.filter(fase=fase_normalizada)
+
+            if (
+                fase_normalizada == EmbarqueReparto.FASE_PROGRAMADO
+                and not ruta_id
+                and ruta_usuario
+            ):
+                latest_programado_id = queryset.order_by('-id').values_list('id', flat=True).first()
+                if latest_programado_id:
+                    queryset = queryset.filter(id=latest_programado_id)
+                else:
+                    queryset = queryset.none()
 
         if encargado_id:
             queryset = queryset.filter(encargado_id=encargado_id)
@@ -1274,13 +1298,20 @@ def obtener_caja_movimientos_embarque(request):
 
 @extend_schema(
     summary="Listado de pedidos del usuario en fase REPARTO",
-    description="Devuelve el embarque activo en REPARTO del usuario y sus pedidos/preventas con detalle de productos.",
+    description="Devuelve el embarque activo del usuario (PROGRAMADO o REPARTO) y sus pedidos con detalle de productos cargados.",
     parameters=[
         OpenApiParameter(
             name='embarque_id',
             type=OpenApiTypes.INT,
             location=OpenApiParameter.QUERY,
             description='ID de embarque opcional. Si no se envía, se busca el REPARTO activo del usuario.',
+            required=False
+        ),
+        OpenApiParameter(
+            name='fase',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description='Fase a consultar cuando no se envía embarque_id. Valores: PROGRAMADO o REPARTO (default REPARTO).',
             required=False
         )
     ],
@@ -1308,6 +1339,9 @@ def listado_pedidos_usuario_reparto(request):
 
     try:
         embarque_id = request.query_params.get('embarque_id')
+        fase_param = (request.query_params.get('fase') or EmbarqueReparto.FASE_REPARTO).strip().upper()
+        if fase_param == EmbarqueReparto.FASE_CARGA_LEGACY:
+            fase_param = EmbarqueReparto.FASE_PROGRAMADO
 
         queryset = EmbarqueReparto.objects.select_related(
             'ruta',
@@ -1318,7 +1352,14 @@ def listado_pedidos_usuario_reparto(request):
                 queryset=Venta.objects.select_related('cliente').prefetch_related('detalles__producto__unidad_sat').exclude(
                     fase=Venta.FASE_CANCELADA
                 )
-            )
+            ),
+            Prefetch(
+                'productos',
+                queryset=ProductoEmbarque.objects.select_related(
+                    'producto__unidad_sat',
+                    'preventa',
+                )
+            ),
         ).filter(
             status_model=BaseModel.STATUS_MODEL_ACTIVE
         )
@@ -1326,8 +1367,17 @@ def listado_pedidos_usuario_reparto(request):
         if embarque_id:
             queryset = queryset.filter(id=embarque_id)
         else:
+            if fase_param not in [EmbarqueReparto.FASE_PROGRAMADO, EmbarqueReparto.FASE_REPARTO]:
+                return Response(
+                    {'detail': "El parámetro 'fase' solo acepta PROGRAMADO o REPARTO."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             queryset = queryset.filter(
-                fase=EmbarqueReparto.FASE_REPARTO
+                fase__in=(
+                    EmbarqueReparto.fases_programado_compat()
+                    if fase_param == EmbarqueReparto.FASE_PROGRAMADO
+                    else [EmbarqueReparto.FASE_REPARTO]
+                )
             ).filter(
                 Q(encargado=request.user) | Q(ruta__asignado=request.user)
             )
@@ -1339,26 +1389,74 @@ def listado_pedidos_usuario_reparto(request):
                 status=status.HTTP_404_NOT_FOUND
             )
 
+        productos_por_venta = {}
+        for prod_emb in embarque.productos.all():
+            if prod_emb.tipo != ProductoEmbarque.PEDIDO or not prod_emb.preventa_id:
+                continue
+            productos_por_venta.setdefault(prod_emb.preventa_id, []).append(prod_emb)
+
         ventas_data = []
         for venta in embarque.ventas.all().order_by('-created_at'):
+            detalles_venta_map = {d.producto_id: d for d in venta.detalles.all()}
             detalles_data = []
-            for detalle in venta.detalles.all():
-                detalles_data.append({
-                    'id': detalle.id,
-                    'producto_id': detalle.producto_id,
-                    'producto_codigo': detalle.producto.codigo if detalle.producto else None,
-                    'producto_nombre': detalle.producto.nombre if detalle.producto else None,
-                    'unidad_medida': detalle.producto.unidad_sat.nombre if detalle.producto and detalle.producto.unidad_sat else None,
-                    'unidad_clave': detalle.producto.unidad_sat.clave if detalle.producto and detalle.producto.unidad_sat else None,
-                    'cantidad': cantidad_prioritaria(detalle),
-                    'cantidad_logistica': detalle.cantidad_logistica,
-                    'cantidad_cargada': detalle.cantidad_cargada,
-                    'cantidad_entregada': detalle.cantidad_entregada,
-                    'precio_unitario': detalle.precio_unitario,
-                    'subtotal': detalle.subtotal,
-                    'is_cargado': detalle.is_cargado,
-                    'is_entregado': detalle.is_entregado,
-                })
+            productos_cargados = productos_por_venta.get(venta.id, [])
+
+            if productos_cargados:
+                for producto_embarque in productos_cargados:
+                    detalle = detalles_venta_map.get(producto_embarque.producto_id)
+                    cantidad_logistica = (
+                        detalle.cantidad_logistica
+                        if detalle and detalle.cantidad_logistica and detalle.cantidad_logistica > 0
+                        else producto_embarque.cantidad
+                    )
+                    cantidad_entregada = detalle.cantidad_entregada if detalle else Decimal('0.000')
+                    precio_unitario = (
+                        detalle.precio_unitario
+                        if detalle and detalle.precio_unitario is not None
+                        else producto_embarque.precio_unitario
+                    )
+                    detalles_data.append({
+                        'id': detalle.id if detalle else None,
+                        'producto_id': producto_embarque.producto_id,
+                        'producto_codigo': producto_embarque.producto.codigo if producto_embarque.producto else None,
+                        'producto_nombre': producto_embarque.producto.nombre if producto_embarque.producto else None,
+                        'unidad_medida': (
+                            producto_embarque.producto.unidad_sat.nombre
+                            if producto_embarque.producto and producto_embarque.producto.unidad_sat
+                            else None
+                        ),
+                        'unidad_clave': (
+                            producto_embarque.producto.unidad_sat.clave
+                            if producto_embarque.producto and producto_embarque.producto.unidad_sat
+                            else None
+                        ),
+                        'cantidad': cantidad_logistica,
+                        'cantidad_logistica': cantidad_logistica,
+                        'cantidad_cargada': producto_embarque.cantidad,
+                        'cantidad_entregada': cantidad_entregada,
+                        'precio_unitario': precio_unitario,
+                        'subtotal': (precio_unitario or Decimal('0.000')) * (cantidad_logistica or Decimal('0.000')),
+                        'is_cargado': True,
+                        'is_entregado': bool(detalle.is_entregado) if detalle else False,
+                    })
+            else:
+                for detalle in venta.detalles.all():
+                    detalles_data.append({
+                        'id': detalle.id,
+                        'producto_id': detalle.producto_id,
+                        'producto_codigo': detalle.producto.codigo if detalle.producto else None,
+                        'producto_nombre': detalle.producto.nombre if detalle.producto else None,
+                        'unidad_medida': detalle.producto.unidad_sat.nombre if detalle.producto and detalle.producto.unidad_sat else None,
+                        'unidad_clave': detalle.producto.unidad_sat.clave if detalle.producto and detalle.producto.unidad_sat else None,
+                        'cantidad': cantidad_prioritaria(detalle),
+                        'cantidad_logistica': detalle.cantidad_logistica,
+                        'cantidad_cargada': detalle.cantidad_cargada,
+                        'cantidad_entregada': detalle.cantidad_entregada,
+                        'precio_unitario': detalle.precio_unitario,
+                        'subtotal': detalle.subtotal,
+                        'is_cargado': detalle.is_cargado,
+                        'is_entregado': detalle.is_entregado,
+                    })
 
             ventas_data.append({
                 'id': venta.id,

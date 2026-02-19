@@ -16,6 +16,26 @@ def _dqty(value):
     return d.quantize(QTY_3, rounding=ROUND_HALF_UP)
 
 def crear_movimiento_inventario_almacen_embarque(ruta=None, pedidos=None, productos_tara=None, usuario=None, almacen_origen=None):
+    embarque_abierto = (
+        EmbarqueReparto.objects
+        .select_for_update()
+        .filter(
+            ruta=ruta,
+            status_model=EmbarqueReparto.STATUS_MODEL_ACTIVE,
+            fase__in=[
+                *EmbarqueReparto.fases_programado_compat(),
+                EmbarqueReparto.FASE_REPARTO,
+            ],
+        )
+        .order_by('-id')
+        .first()
+    )
+    if embarque_abierto:
+        raise ValueError(
+            f"La ruta {ruta.codigo if ruta else ''} ya tiene un embarque abierto "
+            f"(ID {embarque_abierto.id}, fase {embarque_abierto.fase})."
+        )
+
     #almacen_help_cedis = Almacen.objects.filter(tipo=Almacen.TIPO_HELP_CEDIS).first()
     almacen_pedidos = ruta.almacen_embarque
     almacen_tara = ruta.almacen_embarque.pertence  # Almacén de tara asociado al almacén de embarque de la ruta

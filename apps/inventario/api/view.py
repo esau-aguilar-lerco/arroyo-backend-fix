@@ -741,6 +741,7 @@ class HistoricoMovimientosDiarioAPIView(APIView):
         almacen_id = request.query_params.get('almacen_id')
         fecha_inicio = request.query_params.get('fecha_inicio')
         fecha_fin = request.query_params.get('fecha_fin')
+        include_virtual = request.query_params.get('include_virtual', 'false').strip().lower() in ['1', 'true', 'yes']
 
         if not producto_id:
             return Response(
@@ -786,6 +787,14 @@ class HistoricoMovimientosDiarioAPIView(APIView):
             producto_id=producto_id,
         )
 
+        if not include_virtual:
+            queryset = queryset.exclude(
+                movimiento__movimiento__in=[
+                    MovimientoInventario.ENTRADA_TRASPASO_VIRTUAL,
+                    MovimientoInventario.SALIDA_TRASPASO_VIRTUAL,
+                ]
+            )
+
         if almacen_id:
             queryset = queryset.filter(
                 models.Q(movimiento__almacen_id=almacen_id) |
@@ -828,6 +837,7 @@ class HistoricoMovimientosDiarioAPIView(APIView):
             'producto_nombre': producto.nombre,
             'fecha_inicio': fecha_inicio,
             'fecha_fin': fecha_fin,
+            'include_virtual': include_virtual,
             'resumen_diario': resumen,
             'detalle': detalle,
             'total_registros': len(detalle),
@@ -875,6 +885,13 @@ class HistoricoMovimientosDiarioAPIView(APIView):
             location=OpenApiParameter.QUERY,
             required=False,
             description="Incluir detalles de lotes individuales"
+        ),
+        OpenApiParameter(
+            name="include_tipos",
+            type=str,
+            location=OpenApiParameter.QUERY,
+            required=False,
+            description="Tipos de almacén a incluir, separados por coma (ej: FIJO,RUTA,EMBARQUE). Por defecto: FIJO"
         )
     ],
     responses={200: InventarioPorAlmacenSerializer}
@@ -1303,6 +1320,7 @@ class InventarioProductoAPIView(APIView):
         puede_ver_costos = _puede_ver_costos(user)
         producto_id = request.query_params.get('producto_id')
         almacen_id = request.query_params.get('almacen_id')
+        include_tipos = request.query_params.get('include_tipos', '')
         incluir_lotes = True#request.query_params.get('incluir_lotes', 'false').lower() == 'true'
         
         if not producto_id:
@@ -1314,10 +1332,39 @@ class InventarioProductoAPIView(APIView):
         except Producto.DoesNotExist:
             return Response({"detail": "Producto no encontrado"}, status=status.HTTP_404_NOT_FOUND)
 
+        alias_tipos = {
+            'FIJO': Almacen.TIPO_FIJO,
+            'VIRT': Almacen.TIPO_VIRTUAL,
+            'VIRTUAL': Almacen.TIPO_VIRTUAL,
+            'TRAS': Almacen.TIPO_TRASPASO,
+            'TRASPASO': Almacen.TIPO_TRASPASO,
+            'COMP': Almacen.TIPO_COMPRA,
+            'COMPRA': Almacen.TIPO_COMPRA,
+            'RUTA': Almacen.TIPO_RUTA,
+            'HELP': Almacen.TIPO_HELP_CEDIS,
+            'HELP_CEDIS': Almacen.TIPO_HELP_CEDIS,
+            'EMBA': Almacen.TIPO_EMBARQUE,
+            'EMBARQUE': Almacen.TIPO_EMBARQUE,
+            'INSD': Almacen.TIPO_INCIDENCIAS,
+            'INCIDENCIAS': Almacen.TIPO_INCIDENCIAS,
+        }
+        tipos_incluidos = [Almacen.TIPO_FIJO]
+        if include_tipos:
+            tipos_incluidos = []
+            for tipo_param in [t.strip().upper() for t in include_tipos.split(',') if t.strip()]:
+                tipo_real = alias_tipos.get(tipo_param)
+                if not tipo_real:
+                    return Response(
+                        {"detail": f"Tipo de almacén no soportado en include_tipos: {tipo_param}"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                tipos_incluidos.append(tipo_real)
+            tipos_incluidos = list(dict.fromkeys(tipos_incluidos))
+
         # ========== PASO 1: OBTENER TODOS LOS ALMACENES FIJOS ==========
         almacenes_query = Almacen.objects.filter(
             status_model=BaseModel.STATUS_MODEL_ACTIVE,
-            tipo__in=[Almacen.TIPO_FIJO]
+            tipo__in=tipos_incluidos
         )
         # Filtrar por almacén específico si se proporciona
         if almacen_id:
@@ -1336,10 +1383,9 @@ class InventarioProductoAPIView(APIView):
         if almacen_id:
             lotes_query = lotes_query.filter(almacen_id=almacen_id)
         else:
-            # Solo lotes de almacenes fijos
+            # Solo lotes de los tipos solicitados
             lotes_query = lotes_query.filter(
-                almacen__tipo=Almacen.TIPO_FIJO,
-                #almacen__is_cedis=False
+                almacen__tipo__in=tipos_incluidos,
             )
         
         # Agrupar inventario por almacén
