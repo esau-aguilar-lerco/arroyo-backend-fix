@@ -79,6 +79,22 @@ def _idempotencia_error_response(exc):
         status=exc.http_status,
     )
 
+
+def _safe_fallar_operacion(operacion_id, error_message, http_status, user):
+    """
+    Evita que un fallo secundario al registrar idempotencia oculte el error real
+    de negocio (por ejemplo, transacción marcada para rollback).
+    """
+    try:
+        fallar_operacion(
+            operacion_id=operacion_id,
+            error_message=error_message,
+            http_status=http_status,
+            user=user,
+        )
+    except Exception as fallar_error:
+        print(f"⚠️ [IDEMPOTENCIA] No se pudo registrar fallo de operación: {fallar_error}")
+
 class EmbarqueListCreateAPIView(APIView):
     """
     Vista para listar embarques disponibles y crear nuevos embarques
@@ -185,8 +201,8 @@ class EmbarqueListCreateAPIView(APIView):
                     user=request.user,
                 )
                 return Response(response_payload, status=status.HTTP_201_CREATED)
-        except ValidationError as e:
-            fallar_operacion(
+        except (ValidationError, serializers.ValidationError, ValueError) as e:
+            _safe_fallar_operacion(
                 operacion_id=idempotencia.operacion.id,
                 error_message=str(e),
                 http_status=status.HTTP_400_BAD_REQUEST,
@@ -203,7 +219,7 @@ class EmbarqueListCreateAPIView(APIView):
             import traceback
             print(f"❌ [EMBARQUE ERROR] {str(e)}")
             print(f"❌ [EMBARQUE TRACEBACK]\n{traceback.format_exc()}")
-            fallar_operacion(
+            _safe_fallar_operacion(
                 operacion_id=idempotencia.operacion.id,
                 error_message=str(e),
                 http_status=status.HTTP_400_BAD_REQUEST,
