@@ -868,7 +868,7 @@ def iniciar_reparto(request):
         
         # Validar que el embarque esté en fase PROGRAMADO (legacy CARGA).
         if embarque.fase not in EmbarqueReparto.fases_programado_compat():
-            fallar_operacion(
+            _safe_fallar_operacion(
                 operacion_id=idempotencia.operacion.id,
                 error_message=(
                     f'El embarque debe estar en fase PROGRAMADO para iniciar reparto. '
@@ -931,7 +931,7 @@ def iniciar_reparto(request):
         return Response(response_payload, status=status.HTTP_200_OK)
         
     except EmbarqueReparto.DoesNotExist:
-        fallar_operacion(
+        _safe_fallar_operacion(
             operacion_id=idempotencia.operacion.id,
             error_message='Embarque no encontrado',
             http_status=status.HTTP_404_NOT_FOUND,
@@ -942,7 +942,7 @@ def iniciar_reparto(request):
             status=status.HTTP_404_NOT_FOUND
         )
     except Exception as e:
-        fallar_operacion(
+        _safe_fallar_operacion(
             operacion_id=idempotencia.operacion.id,
             error_message=str(e),
             http_status=status.HTTP_400_BAD_REQUEST,
@@ -1007,55 +1007,68 @@ def finalizar_reparto(request):
             status=idempotencia.replay_status or status.HTTP_200_OK
         )
 
-    model_reparto = EmbarqueReparto.objects.filter(id=reparto_id).first()
-    if not model_reparto:
-        fallar_operacion(
+    try:
+        model_reparto = EmbarqueReparto.objects.filter(id=reparto_id).first()
+        if not model_reparto:
+            _safe_fallar_operacion(
+                operacion_id=idempotencia.operacion.id,
+                error_message='Reparto no encontrado',
+                http_status=status.HTTP_404_NOT_FOUND,
+                user=request.user,
+            )
+            return Response(
+                {'detail': 'Reparto no encontrado', 'code': 'REPARTO_NOT_FOUND'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+            
+        if model_reparto.fase != EmbarqueReparto.FASE_REPARTO:
+            _safe_fallar_operacion(
+                operacion_id=idempotencia.operacion.id,
+                error_message=(
+                    f'El reparto debe estar en fase REPARTO para finalizar. '
+                    f'Fase actual: {model_reparto.fase}'
+                ),
+                http_status=status.HTTP_400_BAD_REQUEST,
+                user=request.user,
+            )
+            return Response(
+                {
+                    'detail': f'El reparto debe estar en fase REPARTO para finalizar. Fase actual: {model_reparto.fase}',
+                    'code': 'REPARTO_INVALID_PHASE',
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        model_reparto.fase = EmbarqueReparto.FASE_TERMINADO
+        model_reparto.fecha_finalizada = timezone.now()
+        model_reparto.save(update_fields=['fase', 'fecha_finalizada', 'updated_at'])
+
+        response_payload = {
+            'success': True,
+            'message': f'Reparto {reparto_id} finalizado exitosamente',
+            'reparto_id': model_reparto.id,
+            'fase': model_reparto.fase,
+            'idempotency_key': idempotency_key,
+        }
+        completar_operacion(
             operacion_id=idempotencia.operacion.id,
-            error_message='Reparto no encontrado',
-            http_status=status.HTTP_404_NOT_FOUND,
+            response_payload=response_payload,
+            http_status=status.HTTP_200_OK,
             user=request.user,
         )
-        return Response(
-            {'detail': 'Reparto no encontrado', 'code': 'REPARTO_NOT_FOUND'},
-            status=status.HTTP_404_NOT_FOUND
-        )
-        
-    if model_reparto.fase != EmbarqueReparto.FASE_REPARTO:
-        fallar_operacion(
+        return Response(response_payload, status=status.HTTP_200_OK)
+    except Exception as e:
+        _safe_fallar_operacion(
             operacion_id=idempotencia.operacion.id,
-            error_message=(
-                f'El reparto debe estar en fase REPARTO para finalizar. '
-                f'Fase actual: {model_reparto.fase}'
-            ),
+            error_message=str(e),
             http_status=status.HTTP_400_BAD_REQUEST,
             user=request.user,
         )
         return Response(
-            {
-                'detail': f'El reparto debe estar en fase REPARTO para finalizar. Fase actual: {model_reparto.fase}',
-                'code': 'REPARTO_INVALID_PHASE',
-            },
+            {'detail': str(e), 'code': 'ERROR_FINALIZAR_REPARTO'},
             status=status.HTTP_400_BAD_REQUEST
         )
-        
-    model_reparto.fase = EmbarqueReparto.FASE_TERMINADO
-    model_reparto.fecha_finalizada = timezone.now()
-    model_reparto.save(update_fields=['fase', 'fecha_finalizada', 'updated_at'])
-
-    response_payload = {
-        'success': True,
-        'message': f'Reparto {reparto_id} finalizado exitosamente',
-        'reparto_id': model_reparto.id,
-        'fase': model_reparto.fase,
-        'idempotency_key': idempotency_key,
-    }
-    completar_operacion(
-        operacion_id=idempotencia.operacion.id,
-        response_payload=response_payload,
-        http_status=status.HTTP_200_OK,
-        user=request.user,
-    )
-    return Response(response_payload, status=status.HTTP_200_OK)
+    
 
 
 """
