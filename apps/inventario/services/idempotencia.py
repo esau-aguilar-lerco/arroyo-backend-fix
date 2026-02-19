@@ -79,27 +79,35 @@ def adquirir_operacion(scope, entity_id, idempotency_key, request_hash, user=Non
     entity_id = str(entity_id)
     with transaction.atomic():
         try:
-            operacion = OperacionIdempotente.objects.create(
-                scope=scope,
-                entity_id=entity_id,
-                idempotency_key=idempotency_key,
-                request_hash=request_hash,
-                estado=OperacionIdempotente.ESTADO_IN_PROGRESS,
-                created_by=user,
-                updated_by=user,
-            )
-            return IdempotenciaAcquireResult(operacion=operacion, replay=False)
-        except IntegrityError:
-            operacion = (
-                OperacionIdempotente.objects
-                .select_for_update()
-                .get(
+            # Savepoint interno para poder seguir consultando si el create
+            # falla por UNIQUE sin romper la transacción externa.
+            with transaction.atomic():
+                operacion = OperacionIdempotente.objects.create(
                     scope=scope,
                     entity_id=entity_id,
                     idempotency_key=idempotency_key,
-                    status_model=OperacionIdempotente.STATUS_MODEL_ACTIVE,
+                    request_hash=request_hash,
+                    estado=OperacionIdempotente.ESTADO_IN_PROGRESS,
+                    created_by=user,
+                    updated_by=user,
                 )
-            )
+            return IdempotenciaAcquireResult(operacion=operacion, replay=False)
+        except IntegrityError:
+            try:
+                operacion = (
+                    OperacionIdempotente.objects
+                    .select_for_update()
+                    .get(
+                        scope=scope,
+                        entity_id=entity_id,
+                        idempotency_key=idempotency_key,
+                        status_model=OperacionIdempotente.STATUS_MODEL_ACTIVE,
+                    )
+                )
+            except OperacionIdempotente.DoesNotExist:
+                raise IdempotenciaConflict(
+                    "Idempotency-Key en conflicto y operación no recuperable."
+                )
 
             if operacion.request_hash != request_hash:
                 raise IdempotenciaConflict(

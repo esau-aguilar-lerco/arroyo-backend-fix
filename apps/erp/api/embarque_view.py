@@ -853,6 +853,14 @@ def iniciar_reparto(request):
         )
     except IdempotenciaError as exc:
         return _idempotencia_error_response(exc)
+    except Exception as exc:
+        return Response(
+            {
+                'detail': f'Error al preparar idempotencia de iniciar reparto: {str(exc)}',
+                'code': 'IDEMPOTENCY_RUNTIME_ERROR',
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
     if idempotencia.replay:
         return Response(
@@ -1000,6 +1008,14 @@ def finalizar_reparto(request):
         )
     except IdempotenciaError as exc:
         return _idempotencia_error_response(exc)
+    except Exception as exc:
+        return Response(
+            {
+                'detail': f'Error al preparar idempotencia de finalizar reparto: {str(exc)}',
+                'code': 'IDEMPOTENCY_RUNTIME_ERROR',
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
     if idempotencia.replay:
         return Response(
