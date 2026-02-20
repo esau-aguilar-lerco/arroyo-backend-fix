@@ -22,17 +22,14 @@ def crear_movimiento_inventario_almacen_embarque(ruta=None, pedidos=None, produc
         .filter(
             ruta=ruta,
             status_model=EmbarqueReparto.STATUS_MODEL_ACTIVE,
-            fase__in=[
-                *EmbarqueReparto.fases_programado_compat(),
-                EmbarqueReparto.FASE_REPARTO,
-            ],
+            fase__in=EmbarqueReparto.fases_programado_compat(),
         )
         .order_by('-id')
         .first()
     )
     if embarque_abierto:
         raise ValueError(
-            f"La ruta {ruta.codigo if ruta else ''} ya tiene un embarque abierto "
+            f"La ruta {ruta.codigo if ruta else ''} ya tiene un embarque programado "
             f"(ID {embarque_abierto.id}, fase {embarque_abierto.fase})."
         )
 

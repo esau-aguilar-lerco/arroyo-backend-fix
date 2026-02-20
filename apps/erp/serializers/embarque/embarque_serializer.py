@@ -239,17 +239,14 @@ class EmbarqueSerializer(serializers.Serializer):
             .filter(
                 ruta=ruta,
                 status_model=BaseModel.STATUS_MODEL_ACTIVE,
-                fase__in=[
-                    *EmbarqueReparto.fases_programado_compat(),
-                    EmbarqueReparto.FASE_REPARTO,
-                ],
+                fase__in=EmbarqueReparto.fases_programado_compat(),
             )
             .order_by('-id')
             .first()
         )
         if embarque_abierto:
             raise serializers.ValidationError(
-                f"La ruta {ruta.codigo if ruta else ''} ya tiene un embarque abierto "
+                f"La ruta {ruta.codigo if ruta else ''} ya tiene un embarque programado "
                 f"(ID {embarque_abierto.id}, fase {embarque_abierto.fase})."
             )
 
