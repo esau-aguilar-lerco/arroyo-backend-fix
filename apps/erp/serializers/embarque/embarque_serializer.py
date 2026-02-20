@@ -198,6 +198,11 @@ class VentasEmbarqueSubidaRutaSerializer(serializers.Serializer):
     )
     ventas = ProductoEmbarqueVentaSerializer(many=True, allow_empty=False, help_text="Lista de ventas con sus productos para el embarque de la ruta")
     productos_tara = ProductosTaraEmbarqueSerializer(many=True, required=False, help_text="Lista de productos en tara asociados a la venta en el embarque")
+    auto_iniciar_reparto = serializers.BooleanField(
+        required=False,
+        default=True,
+        help_text="Si es true (default), al finalizar checkin cambia fase a REPARTO. Si es false, conserva PROGRAMADO."
+    )
 
    
 ################################################################################################################

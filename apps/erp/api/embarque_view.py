@@ -1185,6 +1185,7 @@ def checkin_producto_embarque(request):
             embarque = serializer.validated_data.get('embarque')
             ventas_data = serializer.validated_data.get('ventas', [])
             productos_tara = serializer.validated_data.get('productos_tara', [])
+            auto_iniciar_reparto = serializer.validated_data.get('auto_iniciar_reparto', True)
             
             # Validar que el embarque esté en fase PROGRAMADO (legacy CARGA).
             if embarque.fase not in EmbarqueReparto.fases_programado_compat():
@@ -1256,13 +1257,12 @@ def checkin_producto_embarque(request):
                     # Aquí se puede agregar lógica adicional para tara
                     tara_checkin_count += 1
                     
-            #embarque.fase = EmbarqueReparto.FASE_REPARTO
-            #embarque.save()
-            from django.utils import timezone
-            
-            embarque.fase = EmbarqueReparto.FASE_REPARTO
-            embarque.fecha_salida = timezone.now()
-            embarque.save()
+            if auto_iniciar_reparto:
+                from django.utils import timezone
+                embarque.fase = EmbarqueReparto.FASE_REPARTO
+                if not embarque.fecha_salida:
+                    embarque.fecha_salida = timezone.now()
+                embarque.save(update_fields=['fase', 'fecha_salida', 'updated_at'])
             
             response_payload = {
                 'success': True,
@@ -1271,6 +1271,8 @@ def checkin_producto_embarque(request):
                 'ventas_procesadas': ventas_procesadas,
                 'productos_checkin': productos_checkin_count,
                 'productos_tara_checkin': tara_checkin_count,
+                'fase': embarque.fase,
+                'auto_iniciar_reparto': bool(auto_iniciar_reparto),
                 'idempotency_key': idempotency_key,
             }
             completar_operacion(
@@ -1410,7 +1412,7 @@ def obtener_caja_movimientos_embarque(request):
             name='fase',
             type=OpenApiTypes.STR,
             location=OpenApiParameter.QUERY,
-            description='Fase a consultar cuando no se envía embarque_id. Valores: PROGRAMADO o REPARTO (default REPARTO).',
+            description='Fase opcional cuando no se envía embarque_id. Valores: PROGRAMADO o REPARTO. Si no se envía, prioriza REPARTO activo y, si no existe, PROGRAMADO.',
             required=False
         )
     ],
@@ -1438,9 +1440,14 @@ def listado_pedidos_usuario_reparto(request):
 
     try:
         embarque_id = request.query_params.get('embarque_id')
-        fase_param = (request.query_params.get('fase') or EmbarqueReparto.FASE_REPARTO).strip().upper()
-        if fase_param == EmbarqueReparto.FASE_CARGA_LEGACY:
-            fase_param = EmbarqueReparto.FASE_PROGRAMADO
+        fase_raw = (request.query_params.get('fase') or '').strip().upper()
+        fase_param = None
+        if fase_raw:
+            fase_param = (
+                EmbarqueReparto.FASE_PROGRAMADO
+                if fase_raw == EmbarqueReparto.FASE_CARGA_LEGACY
+                else fase_raw
+            )
 
         queryset = EmbarqueReparto.objects.select_related(
             'ruta',
@@ -1466,25 +1473,36 @@ def listado_pedidos_usuario_reparto(request):
         if embarque_id:
             queryset = queryset.filter(id=embarque_id)
         else:
-            if fase_param not in [EmbarqueReparto.FASE_PROGRAMADO, EmbarqueReparto.FASE_REPARTO]:
+            if fase_param and fase_param not in [EmbarqueReparto.FASE_PROGRAMADO, EmbarqueReparto.FASE_REPARTO]:
                 return Response(
                     {'detail': "El parámetro 'fase' solo acepta PROGRAMADO o REPARTO."},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            queryset = queryset.filter(
-                fase__in=(
-                    EmbarqueReparto.fases_programado_compat()
-                    if fase_param == EmbarqueReparto.FASE_PROGRAMADO
-                    else [EmbarqueReparto.FASE_REPARTO]
-                )
-            ).filter(
+            queryset_usuario = queryset.filter(
                 Q(encargado=request.user) | Q(ruta__asignado=request.user)
             )
+            if fase_param == EmbarqueReparto.FASE_PROGRAMADO:
+                queryset = queryset_usuario.filter(
+                    fase__in=EmbarqueReparto.fases_programado_compat()
+                )
+            elif fase_param == EmbarqueReparto.FASE_REPARTO:
+                queryset = queryset_usuario.filter(fase=EmbarqueReparto.FASE_REPARTO)
+            else:
+                # Flujo app: prioriza REPARTO activo; si no existe, usa PROGRAMADO.
+                reparto_activo = queryset_usuario.filter(
+                    fase=EmbarqueReparto.FASE_REPARTO
+                ).order_by('-id').first()
+                if reparto_activo:
+                    queryset = queryset_usuario.filter(id=reparto_activo.id)
+                else:
+                    queryset = queryset_usuario.filter(
+                        fase__in=EmbarqueReparto.fases_programado_compat()
+                    )
 
         embarque = queryset.order_by('-id').first()
         if not embarque:
             return Response(
-                {'detail': 'No hay embarque en fase REPARTO para el usuario actual.'},
+                {'detail': 'No hay embarque activo (PROGRAMADO/REPARTO) para el usuario actual.'},
                 status=status.HTTP_404_NOT_FOUND
             )
 

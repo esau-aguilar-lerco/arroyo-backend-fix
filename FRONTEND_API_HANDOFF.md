@@ -318,6 +318,7 @@ Reglas de validación importantes:
 - El producto debe pertenecer a la venta.
 - No se permiten negativos.
 - `cantidad_entregada + devolucion <= cantidad pedida`.
+- Si `devolucion > 0`, se requiere motivo (`observacion` en la línea o `observaciones` global).
 - Para devoluciones, la ruta debe tener almacén de tara configurado.
 - Debe existir stock suficiente en almacén de pedidos de ruta.
 
@@ -366,31 +367,107 @@ Error de negocio:
 }
 ```
 
+## 4.1) Endpoint de check-in con compatibilidad legacy
+
+### `POST /api/embarques-reparto/checkin-producto/`
+
+Se mantiene compatibilidad con el flujo web actual y con flujo estricto app:
+
+- `auto_iniciar_reparto=true` (default):
+  - mantiene comportamiento legacy,
+  - al terminar check-in cambia el embarque a `REPARTO` y registra `fecha_salida`.
+- `auto_iniciar_reparto=false`:
+  - solo registra check-in/carga,
+  - conserva el embarque en `PROGRAMADO`,
+  - el inicio de ruta se hace luego con `POST /api/embarques-reparto/iniciar/`.
+
+Body mínimo:
+
+```json
+{
+  "embarque": 25,
+  "ventas": [
+    {
+      "venta": 510,
+      "productos": [
+        {"producto": 13, "check": true},
+        {"producto": 155, "check": true}
+      ]
+    }
+  ],
+  "productos_tara": [],
+  "auto_iniciar_reparto": false
+}
+```
+
+Respuesta relevante:
+- `fase`
+- `auto_iniciar_reparto`
+
 ## 5) Flujo sugerido para Ionic
 
-## Paso 1. Listar pedidos programados
+## Paso 1. Obtener embarque activo del chofer (programado o en reparto)
+
+- Llamar `GET /api/embarques-reparto/pedidos-usuario/` sin parámetros.
+- Comportamiento:
+  - si existe `REPARTO` activo para ese usuario/ruta, devuelve ese.
+  - si no existe, devuelve el más reciente en `PROGRAMADO`.
+- Para forzar fase específica:
+  - `GET /api/embarques-reparto/pedidos-usuario/?fase=PROGRAMADO`
+  - `GET /api/embarques-reparto/pedidos-usuario/?fase=REPARTO`
+
+## Paso 2. Listar pedidos programados (pantalla de carga)
 
 - Llamar `GET /api/embarques/preventas-detalles/?fase=PROGRAMADO`.
 - Renderizar tarjetas por preventa.
 - Usar `productos[*].cantidad` como base para captura de entrega/devolución.
 
-## Paso 2. Capturar entrega por pedido
+## Paso 3. Capturar entrega por pedido
 
 Por cada producto capturar:
 - `cantidad_entregada`
 - `devolucion` (opcional)
 - `observacion` (opcional)
 
-Regla UI recomendada:
+Reglas UI recomendadas:
 - validar en cliente que `entregada + devolucion <= cantidad`.
+- si `devolucion > 0`, exigir `observacion`.
 
-## Paso 3. Confirmar entrega
+## Paso 4. Confirmar entrega
 
 - Enviar `POST /api/reparto/entrega-producto/`.
 - Si `success=true`, retirar pedido de lista o refrescar listado.
 - Si llega `incidencia_id`, mostrar estado de incidencia creada.
 
-## Paso 4. Manejo de reintentos
+## Paso 5. Resolver incidencias de devolución (admin/operativo)
+
+### `POST /api/incidencias/atender-lote/`
+
+Permite cerrar el lote de incidencia y opcionalmente mover inventario por resolución:
+- `REASIGNACION` (reubica a almacén destino)
+- `RETORNO_ALMACEN` (retorna a concentrado o destino indicado)
+
+Body ejemplo:
+
+```json
+{
+  "lotes": [
+    {
+      "incidencia_lote_id": 55,
+      "tipificacion": "Producto danado",
+      "nota": "Se reubica a inventario ruta",
+      "accion": "REASIGNACION",
+      "almacen_destino_id": 37
+    }
+  ]
+}
+```
+
+Notas:
+- `accion` y `almacen_destino_id` son opcionales (compatibles con flujo anterior).
+- Si `accion=RETORNO_ALMACEN` y no envías `almacen_destino_id`, usa `CONCENTRADO DE RUTAS`.
+
+## Paso 6. Manejo de reintentos
 
 - Evitar doble tap en botón "Confirmar entrega".
 - Si falla por red, permitir reintento manual.

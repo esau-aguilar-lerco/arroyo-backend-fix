@@ -6,17 +6,156 @@ from rest_framework.pagination import LimitOffsetPagination
 from django.db import transaction
 from django.db.models import Q, Prefetch
 from django.utils import timezone
+from decimal import Decimal, ROUND_HALF_UP
 
 from drf_spectacular.utils import extend_schema, inline_serializer, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 
 from apps.base.models import BaseModel
-from apps.erp.models import incidencia as IncidenciaModel, IncidenciaLote
+from apps.erp.models import incidencia as IncidenciaModel, IncidenciaLote, Almacen
+from apps.inventario.models import MovimientoInventario, ProductosMovimiento, LoteInventario
 from apps.erp.serializers.incidencias.incidenciaSerializer import (
     IncidenciaMiniSerializer,
     IncidenciaDetailSerializer,
     AtenderIncidenciaLoteSerializer,
 )
+
+QTY_3 = Decimal("0.001")
+
+
+def _q3(value):
+    if value is None:
+        return Decimal("0.000")
+    if isinstance(value, Decimal):
+        return value.quantize(QTY_3, rounding=ROUND_HALF_UP)
+    return Decimal(str(value)).quantize(QTY_3, rounding=ROUND_HALF_UP)
+
+
+def _resolver_almacen_destino(incidencia_lote, accion, almacen_destino_id, user):
+    lote = incidencia_lote.lote
+
+    if accion not in {"REASIGNACION", "RETORNO_ALMACEN"}:
+        return None
+
+    if almacen_destino_id:
+        destino = Almacen.objects.filter(
+            id=almacen_destino_id,
+            status_model=BaseModel.STATUS_MODEL_ACTIVE
+        ).first()
+        if not destino:
+            raise ValueError(f"El almacén destino {almacen_destino_id} no existe o está inactivo.")
+        return destino
+
+    if accion == "RETORNO_ALMACEN":
+        concentrado = Almacen.objects.filter(
+            nombre__iexact="CONCENTRADO DE RUTAS",
+            status_model=BaseModel.STATUS_MODEL_ACTIVE
+        ).first()
+        if concentrado:
+            return concentrado
+        raise ValueError("No existe almacén 'CONCENTRADO DE RUTAS' para RETORNO_ALMACEN.")
+
+    # REASIGNACION sin destino explícito: usar almacén del usuario operativo.
+    almacen_usuario = getattr(user, 'almacen', None)
+    if almacen_usuario and almacen_usuario.id != lote.almacen_id:
+        return almacen_usuario
+
+    raise ValueError(
+        "Para acción REASIGNACION debes enviar almacen_destino_id o usar un usuario con almacén asignado."
+    )
+
+
+def _mover_lote_por_resolucion(incidencia_lote, almacen_destino, user, accion):
+    lote_origen = incidencia_lote.lote
+    lote_origen.refresh_from_db()
+
+    if not lote_origen.almacen:
+        raise ValueError(f"El lote {lote_origen.id} no tiene almacén origen.")
+
+    if lote_origen.almacen_id == almacen_destino.id:
+        return None
+
+    cantidad = _q3(incidencia_lote.cantidad)
+    if cantidad <= 0:
+        raise ValueError(f"La cantidad de incidencia para lote {lote_origen.id} debe ser mayor a 0.")
+
+    if _q3(lote_origen.cantidad) < cantidad:
+        raise ValueError(
+            f"No hay suficiente inventario en lote {lote_origen.id} para mover {cantidad}. "
+            f"Disponible: {_q3(lote_origen.cantidad)}."
+        )
+
+    referencia = f"INC-{accion}-L{lote_origen.id}-I{incidencia_lote.id}"
+    nota = f"Movimiento por atención de incidencia #{incidencia_lote.incidencia_id} ({accion})"
+
+    mov_salida = MovimientoInventario.objects.create(
+        almacen=lote_origen.almacen,
+        almacen_destino=almacen_destino,
+        tipo=MovimientoInventario.TIPO_SALIDA,
+        movimiento=MovimientoInventario.SALIDA_TRASPASO,
+        cantidad=cantidad,
+        referencia=f"{referencia}-SAL",
+        nota=nota,
+        detalle_nota=f"SALIDA {lote_origen.almacen.nombre} -> {almacen_destino.nombre}",
+        fase=MovimientoInventario.FASE_TERMINADA,
+        created_by=user,
+        updated_by=user,
+    )
+
+    ProductosMovimiento.objects.create(
+        movimiento=mov_salida,
+        producto=lote_origen.producto,
+        lote=lote_origen,
+        cantidad=cantidad,
+        costo_unitario=lote_origen.costo_unitario,
+        created_by=user,
+        updated_by=user,
+    )
+
+    lote_destino = LoteInventario.objects.create(
+        lote_herencia=lote_origen,
+        producto=lote_origen.producto,
+        almacen=almacen_destino,
+        cantidad=Decimal("0.000"),
+        costo_unitario=lote_origen.costo_unitario,
+        fecha_ingreso=timezone.now(),
+        fecha_vencimiento=lote_origen.fecha_vencimiento,
+        created_by=user,
+        updated_by=user,
+    )
+
+    mov_entrada = MovimientoInventario.objects.create(
+        almacen=almacen_destino,
+        almacen_destino=almacen_destino,
+        tipo=MovimientoInventario.TIPO_ENTRADA,
+        movimiento=MovimientoInventario.ENTRADA_TRASPASO,
+        cantidad=cantidad,
+        referencia=f"{referencia}-ENT",
+        nota=nota,
+        detalle_nota=f"ENTRADA {almacen_destino.nombre}",
+        fase=MovimientoInventario.FASE_TERMINADA,
+        created_by=user,
+        updated_by=user,
+    )
+
+    ProductosMovimiento.objects.create(
+        movimiento=mov_entrada,
+        producto=lote_destino.producto,
+        lote=lote_destino,
+        cantidad=cantidad,
+        costo_unitario=lote_destino.costo_unitario,
+        created_by=user,
+        updated_by=user,
+    )
+
+    return {
+        'incidencia_lote_id': incidencia_lote.id,
+        'accion': accion,
+        'almacen_origen_id': lote_origen.almacen_id,
+        'almacen_destino_id': almacen_destino.id,
+        'movimiento_salida_id': mov_salida.id,
+        'movimiento_entrada_id': mov_entrada.id,
+    }
 
 
 class IncidenciaListRetrieveAPIView(APIView):
@@ -131,6 +270,10 @@ class IncidenciaListRetrieveAPIView(APIView):
                 'message': serializers.CharField(),
                 'lotes_atendidos': serializers.IntegerField(),
                 'incidencias_resueltas': serializers.ListField(child=serializers.IntegerField()),
+                'movimientos_generados': serializers.ListField(
+                    child=serializers.DictField(),
+                    required=False
+                ),
             }
         ),
         400: "Error en los datos proporcionados",
@@ -156,15 +299,20 @@ def atender_incidencia_lote(request):
             lotes_data = serializer.validated_data['lotes']
             lotes_atendidos = []
             incidencias_a_verificar = set()
+            movimientos_generados = []
             
             for item in lotes_data:
                 incidencia_lote_id = item['incidencia_lote_id']
                 tipificacion = item.get('tipificacion', '').strip()
                 nota = item.get('nota', '')
+                accion = (item.get('accion') or '').strip().upper()
+                almacen_destino_id = item.get('almacen_destino_id')
                 
                 try:
                     incidencia_lote = IncidenciaLote.objects.select_related(
-                        'incidencia'
+                        'incidencia',
+                        'lote__almacen',
+                        'lote__producto',
                     ).get(pk=incidencia_lote_id, status_model=BaseModel.STATUS_MODEL_ACTIVE)
                 except IncidenciaLote.DoesNotExist:
                     return Response(
@@ -203,15 +351,47 @@ def atender_incidencia_lote(request):
                         )
                         incidencia.save(update_fields=['solucion'])
                 
+                movimiento = None
+                if accion:
+                    almacen_destino = _resolver_almacen_destino(
+                        incidencia_lote=incidencia_lote,
+                        accion=accion,
+                        almacen_destino_id=almacen_destino_id,
+                        user=request.user,
+                    )
+                    movimiento = _mover_lote_por_resolucion(
+                        incidencia_lote=incidencia_lote,
+                        almacen_destino=almacen_destino,
+                        user=request.user,
+                        accion=accion,
+                    )
+
+                    linea_estado = (
+                        f"Lote #{incidencia_lote.lote_id}: {accion} -> "
+                        f"{almacen_destino.nombre} (cant={incidencia_lote.cantidad})"
+                    )
+                    solucion_actual = (incidencia.solucion or "").strip()
+                    if linea_estado not in solucion_actual:
+                        incidencia.solucion = (
+                            f"{solucion_actual}\n{linea_estado}".strip()
+                            if solucion_actual
+                            else linea_estado
+                        )
+                        incidencia.save(update_fields=['solucion'])
+
                 # Marcar como atendido
                 incidencia_lote.atendida = True
                 incidencia_lote.fecha_atencion = timezone.now()
                 if nota:
                     incidencia_lote.nota = nota
+                elif accion:
+                    incidencia_lote.nota = f"Acción aplicada: {accion}"
                 incidencia_lote.save()
                 
                 lotes_atendidos.append(incidencia_lote.id)
                 incidencias_a_verificar.add(incidencia_lote.incidencia_id)
+                if movimiento:
+                    movimientos_generados.append(movimiento)
             
             # Verificar si las incidencias están completamente resueltas
             incidencias_resueltas = []
@@ -230,6 +410,7 @@ def atender_incidencia_lote(request):
                 'lotes_atendidos': len(lotes_atendidos),
                 'lotes_ids': lotes_atendidos,
                 'incidencias_resueltas': incidencias_resueltas,
+                'movimientos_generados': movimientos_generados,
             }, status=status.HTTP_200_OK)
             
     except Exception as e:

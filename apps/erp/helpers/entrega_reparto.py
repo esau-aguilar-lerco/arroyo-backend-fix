@@ -54,6 +54,7 @@ def registrar_entrega_productos(venta: Venta, productos_entregados: list, usuari
     if not detalles_venta:
         raise ValueError("La venta no tiene productos para entregar.")
 
+    observaciones_globales = (observaciones or '').strip()
     incidencia_lotes_payload = []
     incidencia_lineas = []
     productos_procesados = 0
@@ -67,6 +68,11 @@ def registrar_entrega_productos(venta: Venta, productos_entregados: list, usuari
         cantidad_entregada = _to_decimal(item.get('cantidad_entregada', item.get('cantidad')))
         cantidad_devolucion = _to_decimal(item.get('devolucion', 0))
         observacion_item = (item.get('observacion') or '').strip()
+
+        if cantidad_devolucion > 0 and not (observacion_item or observaciones_globales):
+            raise ValueError(
+                f"Debes indicar observación/motivo para devolución del producto {producto.nombre}."
+            )
 
         if cantidad_entregada < 0 or cantidad_devolucion < 0:
             raise ValueError(f"Las cantidades no pueden ser negativas para {producto.nombre}.")
@@ -107,7 +113,12 @@ def registrar_entrega_productos(venta: Venta, productos_entregados: list, usuari
                 user=usuario or venta.created_by,
                 venta=venta,
             )
-            incidencia_lotes_payload.extend(lotes_devolucion)
+            for lote_item in lotes_devolucion:
+                incidencia_lotes_payload.append({
+                    'lote': lote_item['lote'],
+                    'cantidad': lote_item['cantidad'],
+                    'nota': observacion_item or observaciones_globales or f"Devolución de venta {venta.codigo}",
+                })
 
         detalle.cantidad_entregada = cantidad_entregada
         detalle.is_entregado = (cantidad_entregada >= detalle.cantidad)
@@ -127,7 +138,6 @@ def registrar_entrega_productos(venta: Venta, productos_entregados: list, usuari
     venta.save(update_fields=['is_entregado', 'ya_terminada'])
 
     incidencia_model = None
-    observaciones_globales = (observaciones or '').strip()
     if incidencia_lotes_payload or observaciones_globales:
         descripcion = observaciones_globales or incidencia.DEFAULT_DESCRIPCION
         if incidencia_lineas:
@@ -142,7 +152,7 @@ def registrar_entrega_productos(venta: Venta, productos_entregados: list, usuari
                 incidencia=incidencia_model,
                 lote=lote_item['lote'],
                 cantidad=lote_item['cantidad'],
-                nota=f"Devolución de venta {venta.codigo}",
+                nota=lote_item.get('nota') or f"Devolución de venta {venta.codigo}",
                 created_by=usuario or venta.created_by,
             )
 

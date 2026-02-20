@@ -376,8 +376,8 @@ def _crear_movimiento_tara(almacen=None,almacen_destino=None, productos_entrada=
 
 def buscar_lotes_para_embarque_fifo(pedidos=None, productos_tara=None, almacen=None):
     """
-    Busca lotes siguiendo el principio FIFO (First In, First Out).
-    Los lotes más antiguos se usan primero. Los lotes usados no se repiten entre pedidos.
+    Busca lotes siguiendo el principio UEPS/LIFO (Últimas Entradas, Primeras Salidas).
+    Los lotes más recientes se usan primero. Los lotes usados no se repiten entre pedidos.
     
     Args:
         pedidos: Lista de pedidos con estructura:
@@ -456,7 +456,7 @@ def buscar_lotes_para_embarque_fifo(pedidos=None, productos_tara=None, almacen=N
     
     def obtener_lotes_fifo(producto_id):
         """
-        Obtiene los lotes ordenados por FIFO (fecha_ingreso ascendente).
+        Obtiene los lotes ordenados por UEPS/LIFO (fecha_ingreso descendente).
         Retorna queryset de lotes activos con cantidad > 0
         """
         return LoteInventario.objects.filter(
@@ -464,11 +464,11 @@ def buscar_lotes_para_embarque_fifo(pedidos=None, productos_tara=None, almacen=N
             almacen=almacen,
             status_model='ACTIVE',
             cantidad__gt=0
-        ).order_by('fecha_ingreso', 'id')  # FIFO: primero los más antiguos
+        ).order_by('-fecha_ingreso', '-id')  # UEPS: primero los más recientes
     
     def asignar_lotes_a_producto(producto, cantidad_solicitada):
         """
-        Asigna lotes a un producto siguiendo FIFO.
+        Asigna lotes a un producto siguiendo UEPS/LIFO.
         Retorna dict con lotes asignados y estado de completitud.
         """
         producto_id = obtener_producto_id(producto)
@@ -476,7 +476,7 @@ def buscar_lotes_para_embarque_fifo(pedidos=None, productos_tara=None, almacen=N
         cantidad_restante = cantidad_solicitada
         lotes_asignados = []
         
-        # Obtener lotes FIFO para este producto
+        # Obtener lotes UEPS para este producto
         lotes = obtener_lotes_fifo(producto_id)
         
         for lote in lotes:

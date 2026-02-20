@@ -10,7 +10,14 @@ TIPIFICACIONES_INCIDENCIA = [
     "Faltante de producto",
     "Producto incorrecto",
     "Contaminacion",
+    "Reasignacion",
+    "Retorno de almacen",
     "Otro",
+]
+
+ACCIONES_RESOLUCION = [
+    "REASIGNACION",
+    "RETORNO_ALMACEN",
 ]
 
 
@@ -122,6 +129,17 @@ class AtenderIncidenciaLoteItemSerializer(serializers.Serializer):
         help_text="Tipificacion obligatoria para describir la incidencia"
     )
     nota = serializers.CharField(required=False, allow_blank=True, allow_null=True, help_text="Nota de atención (opcional)")
+    accion = serializers.ChoiceField(
+        choices=[(a, a) for a in ACCIONES_RESOLUCION],
+        required=False,
+        allow_null=True,
+        help_text="Acción de resolución opcional. REASIGNACION o RETORNO_ALMACEN."
+    )
+    almacen_destino_id = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        help_text="ID de almacén destino para reubicar el lote (opcional)."
+    )
 
 
 class AtenderIncidenciaLoteSerializer(serializers.Serializer):
