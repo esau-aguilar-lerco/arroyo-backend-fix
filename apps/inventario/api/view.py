@@ -15,7 +15,15 @@ from apps.inventario.services.alertasvencimiento import evaluar_vencimiento
 #MODELS
 from apps.base.models import BaseModel
 from apps.erp.models import Almacen, Compra, Producto
-from apps.inventario.models import Piso, Zona, Rack,  MovimientoInventario, LoteInventario
+from apps.inventario.models import (
+    Piso,
+    Zona,
+    Rack,
+    MovimientoInventario,
+    LoteInventario,
+    EmbarqueReparto,
+    ProductoEmbarque,
+)
 from apps.inventario.models import ProductosMovimiento
 
 #SERIALIZERS
@@ -109,6 +117,159 @@ def _resolver_almacen_consulta_default(request, prefer_concentrado=False):
         ).first()
 
     return None
+
+
+def _resolver_embarque_activo_por_almacen(almacen_id):
+    """
+    Resuelve el embarque activo (REPARTO > PROGRAMADO) asociado a un almacén de ruta/embarque.
+    """
+    if not almacen_id:
+        return None
+
+    fases_programado = EmbarqueReparto.fases_programado_compat()
+    prioridad_fase = models.Case(
+        models.When(fase=EmbarqueReparto.FASE_REPARTO, then=models.Value(0)),
+        models.When(fase__in=fases_programado, then=models.Value(1)),
+        default=models.Value(9),
+        output_field=models.IntegerField(),
+    )
+
+    return (
+        EmbarqueReparto.objects
+        .filter(
+            status_model=BaseModel.STATUS_MODEL_ACTIVE
+        )
+        .filter(
+            models.Q(fase=EmbarqueReparto.FASE_REPARTO) |
+            models.Q(fase__in=fases_programado)
+        )
+        .filter(
+            models.Q(ruta__almacen_id=almacen_id) |
+            models.Q(ruta__almacen_embarque_id=almacen_id)
+        )
+        .select_related('ruta')
+        .prefetch_related(
+            models.Prefetch(
+                'productos',
+                queryset=ProductoEmbarque.objects.select_related('producto', 'producto__unidad_sat').prefetch_related('lotes__lote__ubicacion')
+            )
+        )
+        .annotate(_prioridad_fase=prioridad_fase)
+        .order_by('_prioridad_fase', '-id')
+        .first()
+    )
+
+
+def _inventario_desde_embarque(
+    embarque,
+    producto_id=None,
+    search='',
+    incluir_lotes=False,
+    puede_ver_costos=False,
+):
+    """
+    Construye inventario operativo usando los productos cargados en el embarque activo.
+    """
+    if not embarque:
+        return None
+
+    producto_id_int = None
+    if producto_id not in (None, ''):
+        try:
+            producto_id_int = int(producto_id)
+        except (TypeError, ValueError):
+            return None
+
+    search_l = (search or '').strip().lower()
+    productos_map = {}
+    total_lotes_ids = set()
+
+    for prod_emb in embarque.productos.all():
+        producto = prod_emb.producto
+        if not producto:
+            continue
+
+        if producto_id_int and producto.id != producto_id_int:
+            continue
+        if search_l and search_l not in (producto.nombre or '').lower():
+            continue
+
+        item = productos_map.get(producto.id)
+        if item is None:
+            item = {
+                'producto_id': producto.id,
+                'codigo': producto.codigo,
+                'producto_nombre': producto.nombre,
+                'cantidad_total': Decimal('0.000'),
+                'valor_total': Decimal('0.00'),
+                'precio_publico': _to_decimal_or_zero(getattr(producto, 'precio_publico', None)) if puede_ver_costos else Decimal('0.00'),
+                'precio_base': _to_decimal_or_zero(getattr(producto, 'precio_base', None)) if puede_ver_costos else Decimal('0.00'),
+                'precio_unitario': Decimal('0.00'),
+                'numero_lotes': 0,
+                'unidad_medida': producto.unidad_sat.nombre if getattr(producto, 'unidad_sat', None) else None,
+                'unidad_clave': producto.unidad_sat.clave if getattr(producto, 'unidad_sat', None) else None,
+                'ultima_actualizacion': prod_emb.updated_at,
+                'lotes_relacionados': [],
+                '_lotes_ids': set(),
+            }
+            productos_map[producto.id] = item
+
+        cantidad = _to_decimal_or_zero(prod_emb.cantidad)
+        precio_mov = _to_decimal_or_zero(prod_emb.precio_unitario)
+        if precio_mov <= 0:
+            precio_mov = _to_decimal_or_zero(getattr(producto, 'precio_base', None))
+        if precio_mov <= 0:
+            precio_mov = _to_decimal_or_zero(getattr(producto, 'precio_publico', None))
+
+        item['cantidad_total'] += cantidad
+        item['valor_total'] += (cantidad * precio_mov)
+        if prod_emb.updated_at and (not item['ultima_actualizacion'] or prod_emb.updated_at > item['ultima_actualizacion']):
+            item['ultima_actualizacion'] = prod_emb.updated_at
+
+        for lote_rel in prod_emb.lotes.all():
+            lote_id = lote_rel.lote_id
+            if not lote_id:
+                continue
+            item['_lotes_ids'].add(lote_id)
+            total_lotes_ids.add(lote_id)
+            if not incluir_lotes:
+                continue
+
+            lote_obj = lote_rel.lote
+            item['lotes_relacionados'].append({
+                'id': lote_id,
+                'cantidad': _to_decimal_or_zero(lote_rel.cantidad),
+                'costo_unitario': _to_decimal_or_zero(getattr(lote_obj, 'costo_unitario', None)) if puede_ver_costos else Decimal('0.00'),
+                'fecha_vencimiento': lote_obj.fecha_vencimiento.strftime('%Y-%m-%d') if lote_obj and lote_obj.fecha_vencimiento else None,
+                'fecha_ingreso': lote_obj.fecha_ingreso.strftime('%Y-%m-%d %H:%M:%S') if lote_obj and lote_obj.fecha_ingreso else None,
+                'ubicacion': lote_obj.ubicacion.nombre if lote_obj and lote_obj.ubicacion else None,
+            })
+
+    productos_list = []
+    for item in productos_map.values():
+        cantidad_total = _to_decimal_or_zero(item['cantidad_total'])
+        valor_total = _to_decimal_or_zero(item['valor_total']) if puede_ver_costos else Decimal('0.00')
+        precio_unitario = Decimal('0.00')
+        if puede_ver_costos and cantidad_total > 0:
+            precio_unitario = valor_total / cantidad_total
+            if precio_unitario <= 0:
+                precio_unitario = item['precio_base'] if item['precio_base'] > 0 else item['precio_publico']
+
+        item['precio_unitario'] = precio_unitario
+        item['numero_lotes'] = len(item['_lotes_ids'])
+        del item['_lotes_ids']
+        productos_list.append(item)
+
+    productos_list.sort(key=lambda x: (x.get('producto_nombre') or ''))
+
+    return {
+        'productos': productos_list,
+        'total_lotes': len(total_lotes_ids),
+        'embarque_id': embarque.id,
+        'embarque_fase': embarque.fase,
+        'ruta_id': embarque.ruta_id,
+        'ruta_nombre': embarque.ruta.nombre if embarque.ruta else None,
+    }
 
 
 """
@@ -976,6 +1137,11 @@ class InventarioAlmacenAPIView(APIView):
             almacen_id = almacen.id
         else:
             almacen = Almacen.objects.filter(id=almacen_id).first()
+            if not almacen:
+                return Response(
+                    {'detail': f'Almacén con ID {almacen_id} no encontrado'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
        
         # Query base optimizada
         lotes_query = (
@@ -1121,6 +1287,13 @@ class InventarioAlmacenAPIView(APIView):
             description="Incluir detalles de lotes individuales"
         ),
         OpenApiParameter(
+            name="source",
+            type=str,
+            location=OpenApiParameter.QUERY,
+            required=False,
+            description="Origen de datos: auto (default), lotes o reparto. En auto, almacenes de ruta/embarque priorizan embarque activo."
+        ),
+        OpenApiParameter(
             name="limit",
             type=int,
             location=OpenApiParameter.QUERY,
@@ -1148,7 +1321,14 @@ class InventarioAlmacenConsultaAPIView(APIView):
         producto_id = request.query_params.get('producto_id')
         search = request.query_params.get('search', '').strip()
         incluir_lotes = request.query_params.get('incluir_lotes', 'false').lower() == 'true'
+        source = (request.query_params.get('source') or 'auto').strip().lower()
         puede_ver_costos = _puede_ver_costos(request.user)
+
+        if source not in ['auto', 'lotes', 'reparto']:
+            return Response(
+                {'detail': "El parámetro source solo acepta: auto, lotes o reparto."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         # Validación de parámetros
         if search and len(search) < 2:
@@ -1167,6 +1347,71 @@ class InventarioAlmacenConsultaAPIView(APIView):
             almacen_id = almacen.id
         else:
             almacen = Almacen.objects.filter(id=almacen_id).first()
+            if not almacen:
+                return Response(
+                    {'detail': f'Almacén con ID {almacen_id} no encontrado'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+        # Inventario operativo de reparto (productos de pedido + tara del embarque activo)
+        usar_reparto = (
+            source in ['auto', 'reparto']
+            and almacen
+            and almacen.tipo in [Almacen.TIPO_RUTA, Almacen.TIPO_EMBARQUE]
+        )
+        if usar_reparto:
+            embarque_activo = _resolver_embarque_activo_por_almacen(almacen.id)
+            snapshot = _inventario_desde_embarque(
+                embarque=embarque_activo,
+                producto_id=producto_id,
+                search=search,
+                incluir_lotes=incluir_lotes,
+                puede_ver_costos=puede_ver_costos
+            )
+
+            # Para almacenes de ruta/embarque, source=auto también opera en modo reparto:
+            # si no hay embarque activo (REPARTO/PROGRAMADO), se retorna vacío.
+            productos_list = snapshot['productos'] if snapshot else []
+
+            try:
+                limit = int(request.query_params.get('limit', 10))
+                offset = int(request.query_params.get('offset', 0))
+            except (ValueError, TypeError):
+                limit = 10
+                offset = 0
+
+            if limit <= 0:
+                limit = 10
+            if offset < 0:
+                offset = 0
+
+            paginator = LimitOffsetPagination()
+            paginator.default_limit = limit
+            productos_paginados = paginator.paginate_queryset(productos_list, request)
+
+            if not productos_paginados and productos_list:
+                total = len(productos_list)
+                last_offset = max(0, ((total - 1) // limit) * limit)
+                request.query_params._mutable = True
+                request.query_params['offset'] = str(last_offset)
+                request.query_params._mutable = False
+                productos_paginados = paginator.paginate_queryset(productos_list, request)
+
+            datos_inventario = {
+                'almacen_id': almacen.id,
+                'almacen_nombre': almacen.nombre,
+                'almacen_tipo': almacen.get_tipo_display(),
+                'fecha_consulta': timezone.localtime(timezone.now()).strftime('%Y-%m-%d %H:%M:%S'),
+                'total_productos': len(productos_list),
+                'total_lotes': (snapshot or {}).get('total_lotes', 0),
+                'productos': productos_paginados or [],
+                'origen_datos': 'reparto',
+                'embarque_id': (snapshot or {}).get('embarque_id'),
+                'embarque_fase': (snapshot or {}).get('embarque_fase'),
+                'ruta_id': (snapshot or {}).get('ruta_id'),
+                'ruta_nombre': (snapshot or {}).get('ruta_nombre'),
+            }
+            return paginator.get_paginated_response(datos_inventario)
 
         # Query base optimizada
         lotes_query = (
@@ -1229,7 +1474,8 @@ class InventarioAlmacenConsultaAPIView(APIView):
                     'fecha_consulta': timezone.localtime(timezone.now()).strftime('%Y-%m-%d %H:%M:%S'),
                     'total_productos': 0,
                     'total_lotes': 0,
-                    'productos': []
+                    'productos': [],
+                    'origen_datos': 'lotes',
                 }
             }, status=status.HTTP_200_OK)
         
@@ -1325,7 +1571,8 @@ class InventarioAlmacenConsultaAPIView(APIView):
             'fecha_consulta': timezone.localtime(timezone.now()).strftime('%Y-%m-%d %H:%M:%S'),
             'total_productos': len(productos_list),
             'total_lotes': resumen_totales['total_lotes_real'] or 0,
-            'productos': productos_data
+            'productos': productos_data,
+            'origen_datos': 'lotes',
         }
 
         return paginator.get_paginated_response(datos_inventario)
