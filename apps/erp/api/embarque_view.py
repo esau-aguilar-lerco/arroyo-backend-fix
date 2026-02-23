@@ -1430,7 +1430,14 @@ def obtener_caja_movimientos_embarque(request):
     abonos_caja_qs = apertura_caja.transacciones.filter(
         status_model=BaseModel.STATUS_MODEL_ACTIVE,
         tipo=CajaTransaccion.TIPO_ENTRADA,
-        descripcion__icontains='Pago de crédito ID',
+    ).filter(
+        Q(descripcion__icontains='Pago de crédito ID') |
+        Q(descripcion__icontains='Pago de credito ID')
+    )
+    ventas_caja_qs = apertura_caja.transacciones.filter(
+        status_model=BaseModel.STATUS_MODEL_ACTIVE,
+        tipo=CajaTransaccion.TIPO_ENTRADA,
+        descripcion__icontains='Pago de venta',
     )
     total_abonos = float(abonos_caja_qs.aggregate(total=Sum('monto')).get('total') or 0.0)
     total_abonos_efectivo = float(
@@ -1438,13 +1445,13 @@ def obtener_caja_movimientos_embarque(request):
             metodo_pago__nombre__iexact='EFECTIVO'
         ).aggregate(total=Sum('monto')).get('total') or 0.0
     )
-    abonos_por_metodo_rows = abonos_caja_qs.values(
-        'metodo_pago_id',
-        'metodo_pago__nombre',
-    ).annotate(
+    abonos_por_metodo_rows = abonos_caja_qs.values('metodo_pago_id', 'metodo_pago__nombre').annotate(
         monto_total=Sum('monto'),
         cantidad_pagos=Count('id'),
-    ).order_by('metodo_pago__nombre')
+    )
+    ventas_por_metodo_rows = ventas_caja_qs.values('metodo_pago_id').annotate(
+        monto_total=Sum('monto')
+    )
     
     response_data['ventas'] = ventas_serializer.data
     response_data['total_ventas'] = round(total_ventas, 2)
@@ -1460,8 +1467,27 @@ def obtener_caja_movimientos_embarque(request):
             'monto_total': round(float(row.get('monto_total') or 0), 2),
             'cantidad_pagos': int(row.get('cantidad_pagos') or 0),
         }
-        for row in abonos_por_metodo_rows
+        for row in abonos_por_metodo_rows.order_by('metodo_pago__nombre')
     ]
+    from apps.contabilidad.models import MetodoPago
+    metodos = list(MetodoPago.objects.filter(activo=True).values('id', 'nombre').order_by('nombre'))
+    ventas_map = {row['metodo_pago_id']: float(row['monto_total'] or 0) for row in ventas_por_metodo_rows}
+    abonos_map = {row['metodo_pago_id']: float(row['monto_total'] or 0) for row in abonos_por_metodo_rows}
+    formas_pago = []
+    for metodo in metodos:
+        ventas_total = round(ventas_map.get(metodo['id'], 0.0), 2)
+        abonos_total = round(abonos_map.get(metodo['id'], 0.0), 2)
+        formas_pago.append({
+            'metodo_pago_id': metodo['id'],
+            'metodo_pago_nombre': metodo['nombre'],
+            'ventas': ventas_total,
+            'abonos': abonos_total,
+            'total': round(ventas_total + abonos_total, 2),
+        })
+    response_data['formas_pago'] = formas_pago
+    response_data['total_ventas_formas_pago'] = round(sum(item['ventas'] for item in formas_pago), 2)
+    response_data['total_abonos_formas_pago'] = round(sum(item['abonos'] for item in formas_pago), 2)
+    response_data['total_general_formas_pago'] = round(sum(item['total'] for item in formas_pago), 2)
     
     return Response(response_data, status=status.HTTP_200_OK)
 

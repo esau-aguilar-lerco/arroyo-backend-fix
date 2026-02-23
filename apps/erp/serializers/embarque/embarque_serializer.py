@@ -5,9 +5,11 @@ from apps.inventario.models import LoteInventario, EmbarqueReparto, ProductoEmba
 from apps.base.serializer import FlexiblePKRelatedField, SerializerRelatedField
 from apps.base.models import BaseModel
 from django.db.models import Sum, Count
+from django.db.models import Q
 from decimal import Decimal, InvalidOperation
 
 from apps.erp.helpers.embarque import crear_movimiento_inventario_almacen_embarque
+from apps.contabilidad.models import MetodoPago
 
 
 ################################################################################################################
@@ -360,7 +362,7 @@ class VentaEmbarqueSerializer(serializers.Serializer):
     codigo = serializers.CharField(read_only=True)
     cliente_id = serializers.IntegerField(source='cliente.id', read_only=True)
     cliente_nombre = serializers.SerializerMethodField()
-    fase = serializers.CharField(read_only=True)
+    fase = serializers.SerializerMethodField()
     total = serializers.DecimalField(max_digits=25, decimal_places=2, read_only=True)
     is_entregado = serializers.BooleanField(read_only=True)
     is_total_cargado = serializers.BooleanField(read_only=True)
@@ -376,6 +378,10 @@ class VentaEmbarqueSerializer(serializers.Serializer):
             apellido_paterno = obj.cliente.apellido_paterno or ''
             return f"{nombre} {apellido_paterno}".strip()
         return None
+
+    def get_fase(self, obj):
+        # Para la app/web de reparto, una venta entregada debe mostrarse como TERMINADA.
+        return Venta.FASE_TERMINADA if getattr(obj, 'is_entregado', False) else obj.fase
     
     def get_detalles(self, obj):
         """Obtiene los detalles de la venta con cantidad, cantidad_entregada, etc."""
@@ -529,6 +535,10 @@ class EmbarqueDetailSerializer(serializers.ModelSerializer):
     total_abonos_efectivo = serializers.SerializerMethodField()
     recibio_abono = serializers.SerializerMethodField()
     abonos_por_metodo = serializers.SerializerMethodField()
+    formas_pago = serializers.SerializerMethodField()
+    total_ventas_formas_pago = serializers.SerializerMethodField()
+    total_abonos_formas_pago = serializers.SerializerMethodField()
+    total_general_formas_pago = serializers.SerializerMethodField()
     
     class Meta:
         model = EmbarqueReparto
@@ -554,6 +564,10 @@ class EmbarqueDetailSerializer(serializers.ModelSerializer):
             'total_abonos_efectivo',
             'recibio_abono',
             'abonos_por_metodo',
+            'formas_pago',
+            'total_ventas_formas_pago',
+            'total_abonos_formas_pago',
+            'total_general_formas_pago',
         ]
 
     def _ventas_queryset(self, obj):
@@ -570,23 +584,84 @@ class EmbarqueDetailSerializer(serializers.ModelSerializer):
         return qs
 
     def _abonos_queryset(self, obj):
+        """
+        Abonos capturados en la caja del embarque/reparto (cash operativo de ruta).
+        """
         cache = self.context.setdefault('_abonos_cache', {})
         if obj.id in cache:
             return cache[obj.id]
 
-        # Import local para evitar acoplamiento/ciclos de carga en import-time.
-        from apps.credito.models import PagosCredito
-
-        ventas_ids = list(self._ventas_queryset(obj).values_list('id', flat=True))
-        if not ventas_ids:
-            qs = PagosCredito.objects.none()
+        apertura_caja = getattr(obj, 'apertura_caja', None)
+        if not apertura_caja:
+            qs = CajaTransaccion.objects.none()
         else:
-            qs = PagosCredito.objects.filter(
-                credito__venta_id__in=ventas_ids,
+            qs = CajaTransaccion.objects.filter(
+                caja_apertura=apertura_caja,
                 status_model=BaseModel.STATUS_MODEL_ACTIVE,
+                tipo=CajaTransaccion.TIPO_ENTRADA,
+            ).filter(
+                Q(descripcion__icontains='Pago de crédito ID') |
+                Q(descripcion__icontains='Pago de credito ID')
             )
         cache[obj.id] = qs
         return qs
+
+    def _ventas_transacciones_queryset(self, obj):
+        cache = self.context.setdefault('_ventas_transacciones_cache', {})
+        if obj.id in cache:
+            return cache[obj.id]
+
+        apertura_caja = getattr(obj, 'apertura_caja', None)
+        if not apertura_caja:
+            qs = CajaTransaccion.objects.none()
+        else:
+            qs = CajaTransaccion.objects.filter(
+                caja_apertura=apertura_caja,
+                status_model=BaseModel.STATUS_MODEL_ACTIVE,
+                tipo=CajaTransaccion.TIPO_ENTRADA,
+                descripcion__icontains='Pago de venta',
+            )
+        cache[obj.id] = qs
+        return qs
+
+    def _formas_pago_rows(self, obj):
+        cache = self.context.setdefault('_formas_pago_rows_cache', {})
+        if obj.id in cache:
+            return cache[obj.id]
+
+        metodos = list(
+            MetodoPago.objects.filter(activo=True).values('id', 'nombre').order_by('nombre')
+        )
+        ventas_rows = self._ventas_transacciones_queryset(obj).values('metodo_pago_id').annotate(
+            monto_total=Sum('monto')
+        )
+        abonos_rows = self._abonos_queryset(obj).values('metodo_pago_id').annotate(
+            monto_total=Sum('monto')
+        )
+
+        ventas_map = {
+            row['metodo_pago_id']: (row['monto_total'] or Decimal('0.00'))
+            for row in ventas_rows
+        }
+        abonos_map = {
+            row['metodo_pago_id']: (row['monto_total'] or Decimal('0.00'))
+            for row in abonos_rows
+        }
+
+        rows = []
+        for metodo in metodos:
+            ventas_total = Decimal(str(ventas_map.get(metodo['id'], Decimal('0.00'))))
+            abonos_total = Decimal(str(abonos_map.get(metodo['id'], Decimal('0.00'))))
+            rows.append({
+                'metodo_pago_id': metodo['id'],
+                'metodo_pago_nombre': metodo['nombre'],
+                'ventas': ventas_total,
+                'abonos': abonos_total,
+                'total': ventas_total + abonos_total,
+            })
+
+        cache[obj.id] = rows
+        return rows
     
     def get_ventas(self, obj):
         """Obtiene las ventas del embarque con sus productos cargados (solo si include_ventas=true)"""
@@ -619,20 +694,43 @@ class EmbarqueDetailSerializer(serializers.ModelSerializer):
         return self._abonos_queryset(obj).exists()
 
     def get_abonos_por_metodo(self, obj):
-        rows = self._abonos_queryset(obj).values(
-            'metodo_pago_id',
-            'metodo_pago__nombre',
-        ).annotate(
+        rows = self._abonos_queryset(obj).values('metodo_pago_id', 'metodo_pago__nombre').annotate(
             monto_total=Sum('monto'),
             cantidad_pagos=Count('id'),
-        ).order_by('metodo_pago__nombre')
-
-        return [
-            {
+        )
+        base = {
+            row['metodo_pago_id']: {
                 'metodo_pago_id': row['metodo_pago_id'],
                 'metodo_pago_nombre': row['metodo_pago__nombre'],
                 'monto_total': row['monto_total'] or Decimal('0.00'),
                 'cantidad_pagos': row['cantidad_pagos'] or 0,
             }
             for row in rows
-        ]
+        }
+
+        # Completar métodos no usados con cero para no romper UI de reportes.
+        salida = []
+        for row in self._formas_pago_rows(obj):
+            metodo_id = row['metodo_pago_id']
+            data = base.get(metodo_id, None)
+            if not data:
+                data = {
+                    'metodo_pago_id': metodo_id,
+                    'metodo_pago_nombre': row['metodo_pago_nombre'],
+                    'monto_total': Decimal('0.00'),
+                    'cantidad_pagos': 0,
+                }
+            salida.append(data)
+        return salida
+
+    def get_formas_pago(self, obj):
+        return self._formas_pago_rows(obj)
+
+    def get_total_ventas_formas_pago(self, obj):
+        return sum((row['ventas'] for row in self._formas_pago_rows(obj)), Decimal('0.00'))
+
+    def get_total_abonos_formas_pago(self, obj):
+        return sum((row['abonos'] for row in self._formas_pago_rows(obj)), Decimal('0.00'))
+
+    def get_total_general_formas_pago(self, obj):
+        return sum((row['total'] for row in self._formas_pago_rows(obj)), Decimal('0.00'))

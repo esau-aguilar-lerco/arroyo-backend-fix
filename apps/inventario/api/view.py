@@ -151,7 +151,14 @@ def _resolver_embarque_activo_por_almacen(almacen_id):
         .prefetch_related(
             models.Prefetch(
                 'productos',
-                queryset=ProductoEmbarque.objects.select_related('producto', 'producto__unidad_sat').prefetch_related('lotes__lote__ubicacion')
+                queryset=ProductoEmbarque.objects.select_related(
+                    'producto',
+                    'producto__unidad_sat',
+                    'preventa',
+                ).prefetch_related(
+                    'lotes__lote__ubicacion',
+                    'preventa__detalles',
+                )
             )
         )
         .annotate(_prioridad_fase=prioridad_fase)
@@ -214,7 +221,28 @@ def _inventario_desde_embarque(
             }
             productos_map[producto.id] = item
 
-        cantidad = _to_decimal_or_zero(prod_emb.cantidad)
+        cantidad_cargada = _to_decimal_or_zero(prod_emb.cantidad)
+        cantidad = cantidad_cargada
+        if prod_emb.tipo == ProductoEmbarque.PEDIDO and prod_emb.preventa_id:
+            # Ajuste dinámico: para pedidos, el inventario operativo en reparto
+            # debe reflejar lo pendiente por entregar (cargado - entregado).
+            detalle_venta = None
+            preventa = getattr(prod_emb, 'preventa', None)
+            if preventa is not None and hasattr(preventa, 'detalles'):
+                detalle_venta = next(
+                    (d for d in preventa.detalles.all() if d.producto_id == producto.id),
+                    None
+                )
+
+            if detalle_venta is not None:
+                cantidad_entregada = _to_decimal_or_zero(getattr(detalle_venta, 'cantidad_entregada', None))
+                cantidad = cantidad_cargada - cantidad_entregada
+                if cantidad < 0:
+                    cantidad = Decimal('0.000')
+
+        if cantidad <= 0:
+            continue
+
         precio_mov = _to_decimal_or_zero(prod_emb.precio_unitario)
         if precio_mov <= 0:
             precio_mov = _to_decimal_or_zero(getattr(producto, 'precio_base', None))
