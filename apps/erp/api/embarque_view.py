@@ -3,7 +3,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Sum, Q, Count
 from django.core.exceptions import ValidationError
 from collections import defaultdict
 
@@ -88,6 +88,27 @@ def _get_almacen_origen_carga(ruta=None, user=None, explicit_almacen=None):
     if ruta and ruta.almacen_embarque:
         return ruta.almacen_embarque
     return None
+
+
+def _resolve_embarque_programado_for_user(user):
+    """
+    Obtiene el embarque PROGRAMADO más reciente para el usuario autenticado.
+    Se usa como fallback cuando app no envía embarque_id.
+    """
+    if not user or not user.is_authenticated:
+        return None
+
+    return (
+        EmbarqueReparto.objects
+        .select_related('ruta')
+        .filter(
+            status_model=BaseModel.STATUS_MODEL_ACTIVE,
+            fase__in=EmbarqueReparto.fases_programado_compat(),
+        )
+        .filter(Q(encargado=user) | Q(ruta__asignado=user))
+        .order_by('-id')
+        .first()
+    )
 
 
 def _idempotencia_error_response(exc):
@@ -805,7 +826,7 @@ class EmbarqueRepartoListRetrieveAPIView(APIView):
     request=inline_serializer(
         name='IniciarRepartoRequest',
         fields={
-            'embarque_id': serializers.IntegerField(help_text="ID del embarque a iniciar"),
+            'embarque_id': serializers.IntegerField(required=False, help_text="ID del embarque a iniciar (opcional para app, se resuelve por usuario)"),
             'encargado_id': serializers.IntegerField(required=False, help_text="ID del encargado del reparto (opcional)"),
             'nota': serializers.CharField(required=False, help_text="Nota adicional (opcional)"),
         }
@@ -835,14 +856,30 @@ def iniciar_reparto(request):
     
     embarque_id = request.data.get('embarque_id')
     nota = request.data.get('nota', None)
-    
+
+    # Compatibilidad app: si no envían embarque_id, resolver el PROGRAMADO del usuario.
+    if not embarque_id:
+        embarque_programado = _resolve_embarque_programado_for_user(request.user)
+        if embarque_programado:
+            embarque_id = embarque_programado.id
+
     if not embarque_id:
         return Response(
-            {'detail': 'embarque_id es requerido'},
+            {'detail': 'No hay embarque PROGRAMADO para el usuario actual.', 'code': 'EMBARQUE_PROGRAMADO_NOT_FOUND'},
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    request_hash = construir_request_hash(request.data)
+    try:
+        embarque_id = int(embarque_id)
+    except (TypeError, ValueError):
+        return Response(
+            {'detail': 'embarque_id inválido', 'code': 'EMBARQUE_ID_INVALID'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    payload_idempotencia = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+    payload_idempotencia['embarque_id'] = embarque_id
+    request_hash = construir_request_hash(payload_idempotencia)
     try:
         idempotency_key = resolver_idempotency_key(request, request_hash)
         idempotencia = adquirir_operacion(
@@ -1388,11 +1425,43 @@ def obtener_caja_movimientos_embarque(request):
     # Calcular totales de ventas
     total_ventas = sum(float(v.total) for v in ventas_queryset)
     total_cobrado_ventas = sum(float(v.total_pagado) for v in ventas_queryset)
+
+    # Abonos de crédito capturados durante el reparto (cash real de caja del embarque)
+    abonos_caja_qs = apertura_caja.transacciones.filter(
+        status_model=BaseModel.STATUS_MODEL_ACTIVE,
+        tipo=CajaTransaccion.TIPO_ENTRADA,
+        descripcion__icontains='Pago de crédito ID',
+    )
+    total_abonos = float(abonos_caja_qs.aggregate(total=Sum('monto')).get('total') or 0.0)
+    total_abonos_efectivo = float(
+        abonos_caja_qs.filter(
+            metodo_pago__nombre__iexact='EFECTIVO'
+        ).aggregate(total=Sum('monto')).get('total') or 0.0
+    )
+    abonos_por_metodo_rows = abonos_caja_qs.values(
+        'metodo_pago_id',
+        'metodo_pago__nombre',
+    ).annotate(
+        monto_total=Sum('monto'),
+        cantidad_pagos=Count('id'),
+    ).order_by('metodo_pago__nombre')
     
     response_data['ventas'] = ventas_serializer.data
     response_data['total_ventas'] = round(total_ventas, 2)
     response_data['total_cobrado_ventas'] = round(total_cobrado_ventas, 2)
     response_data['cantidad_ventas'] = ventas_queryset.count()
+    response_data['recibio_abonos'] = total_abonos > 0
+    response_data['total_abonos'] = round(total_abonos, 2)
+    response_data['total_abonos_efectivo'] = round(total_abonos_efectivo, 2)
+    response_data['abonos_por_metodo'] = [
+        {
+            'metodo_pago_id': row['metodo_pago_id'],
+            'metodo_pago_nombre': row['metodo_pago__nombre'],
+            'monto_total': round(float(row.get('monto_total') or 0), 2),
+            'cantidad_pagos': int(row.get('cantidad_pagos') or 0),
+        }
+        for row in abonos_por_metodo_rows
+    ]
     
     return Response(response_data, status=status.HTTP_200_OK)
 
@@ -1631,7 +1700,7 @@ def listado_pedidos_usuario_reparto(request):
                 'codigo': venta.codigo,
                 'cliente_id': venta.cliente_id,
                 'cliente_nombre': venta.cliente.get_full_name if venta.cliente else None,
-                'fase': venta.fase,
+                'fase': Venta.FASE_TERMINADA if venta.is_entregado else venta.fase,
                 'condicion_pago': venta.condicion_pago,
                 'total': venta.total,
                 'total_pagado': venta.total_pagado,

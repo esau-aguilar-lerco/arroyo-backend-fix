@@ -4,7 +4,7 @@ from apps.erp.models import VentaDetalle
 from apps.inventario.models import LoteInventario, EmbarqueReparto, ProductoEmbarque
 from apps.base.serializer import FlexiblePKRelatedField, SerializerRelatedField
 from apps.base.models import BaseModel
-from django.db.models import Sum
+from django.db.models import Sum, Count
 from decimal import Decimal, InvalidOperation
 
 from apps.erp.helpers.embarque import crear_movimiento_inventario_almacen_embarque
@@ -523,6 +523,12 @@ class EmbarqueDetailSerializer(serializers.ModelSerializer):
     
     # Ventas del embarque con sus productos cargados
     ventas = serializers.SerializerMethodField()
+    total_ventas = serializers.SerializerMethodField()
+    total_cobrado_ventas = serializers.SerializerMethodField()
+    total_abonos = serializers.SerializerMethodField()
+    total_abonos_efectivo = serializers.SerializerMethodField()
+    recibio_abono = serializers.SerializerMethodField()
+    abonos_por_metodo = serializers.SerializerMethodField()
     
     class Meta:
         model = EmbarqueReparto
@@ -542,13 +548,91 @@ class EmbarqueDetailSerializer(serializers.ModelSerializer):
             'encargado_nombre',
             'productos',
             'ventas',
+            'total_ventas',
+            'total_cobrado_ventas',
+            'total_abonos',
+            'total_abonos_efectivo',
+            'recibio_abono',
+            'abonos_por_metodo',
         ]
+
+    def _ventas_queryset(self, obj):
+        cache = self.context.setdefault('_ventas_cache', {})
+        if obj.id in cache:
+            return cache[obj.id]
+
+        qs = obj.ventas.exclude(
+            status_model=Venta.STATUS_MODEL_DELETE
+        ).exclude(
+            fase=Venta.FASE_CANCELADA
+        )
+        cache[obj.id] = qs
+        return qs
+
+    def _abonos_queryset(self, obj):
+        cache = self.context.setdefault('_abonos_cache', {})
+        if obj.id in cache:
+            return cache[obj.id]
+
+        # Import local para evitar acoplamiento/ciclos de carga en import-time.
+        from apps.credito.models import PagosCredito
+
+        ventas_ids = list(self._ventas_queryset(obj).values_list('id', flat=True))
+        if not ventas_ids:
+            qs = PagosCredito.objects.none()
+        else:
+            qs = PagosCredito.objects.filter(
+                credito__venta_id__in=ventas_ids,
+                status_model=BaseModel.STATUS_MODEL_ACTIVE,
+            )
+        cache[obj.id] = qs
+        return qs
     
     def get_ventas(self, obj):
         """Obtiene las ventas del embarque con sus productos cargados (solo si include_ventas=true)"""
         include_ventas = self.context.get('include_ventas', False)
         if not include_ventas:
             return []
-        ventas = obj.ventas.all()
+        ventas = self._ventas_queryset(obj)
         #.exclude(is_entregado=True)
         return VentaEmbarqueSerializer(ventas, many=True, context={'embarque': obj}).data
+
+    def get_total_ventas(self, obj):
+        total = self._ventas_queryset(obj).aggregate(t=Sum('total')).get('t') or Decimal('0.00')
+        return total
+
+    def get_total_cobrado_ventas(self, obj):
+        total = self._ventas_queryset(obj).aggregate(t=Sum('total_pagado')).get('t') or Decimal('0.00')
+        return total
+
+    def get_total_abonos(self, obj):
+        total = self._abonos_queryset(obj).aggregate(t=Sum('monto')).get('t') or Decimal('0.00')
+        return total
+
+    def get_total_abonos_efectivo(self, obj):
+        total = self._abonos_queryset(obj).filter(
+            metodo_pago__nombre__iexact='EFECTIVO'
+        ).aggregate(t=Sum('monto')).get('t') or Decimal('0.00')
+        return total
+
+    def get_recibio_abono(self, obj):
+        return self._abonos_queryset(obj).exists()
+
+    def get_abonos_por_metodo(self, obj):
+        rows = self._abonos_queryset(obj).values(
+            'metodo_pago_id',
+            'metodo_pago__nombre',
+        ).annotate(
+            monto_total=Sum('monto'),
+            cantidad_pagos=Count('id'),
+        ).order_by('metodo_pago__nombre')
+
+        return [
+            {
+                'metodo_pago_id': row['metodo_pago_id'],
+                'metodo_pago_nombre': row['metodo_pago__nombre'],
+                'monto_total': row['monto_total'] or Decimal('0.00'),
+                'cantidad_pagos': row['cantidad_pagos'] or 0,
+            }
+            for row in rows
+        ]

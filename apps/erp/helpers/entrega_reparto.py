@@ -121,7 +121,8 @@ def registrar_entrega_productos(venta: Venta, productos_entregados: list, usuari
                 })
 
         detalle.cantidad_entregada = cantidad_entregada
-        detalle.is_entregado = (cantidad_entregada >= detalle.cantidad)
+        # Un detalle se considera atendido cuando lo entregado + devuelto cubre lo solicitado.
+        detalle.is_entregado = ((cantidad_entregada + cantidad_devolucion) >= detalle.cantidad)
         detalle.save(update_fields=['cantidad_entregada', 'is_entregado'])
 
         if cantidad_devolucion > 0 or observacion_item:
