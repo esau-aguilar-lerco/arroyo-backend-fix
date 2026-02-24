@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from decimal import Decimal
 
 #MODELS
 from apps.base.models import BaseModel
@@ -79,6 +80,45 @@ class ProductoSerializer(BaseSerializer):
         read_only_fields = ('created_at', 'updated_at', 'created_by', 'updated_by', 'status_model','codigo')
         extra_fields = [ 'proveedores_detalle', 'unidad_sat_detalle']
 
+    def _to_decimal_or_zero(self, value):
+        if value is None:
+            return Decimal('0.00')
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return Decimal('0.00')
+
+    def validate(self, attrs):
+        """
+        Reglas generales de precio de venta:
+        - Ningún precio de venta (mayoreo/menudeo) puede ser <= costo para Arroyo.
+        - Se valida contra costo ponderado cuando el producto ya existe.
+        """
+        instance = getattr(self, 'instance', None)
+        costo_arroyo = instance.get_costo_arroyo() if instance else Decimal('0.00')
+        # Si en el futuro se habilita edición de precio_base, usarlo como costo explícito.
+        if 'precio_base' in attrs and attrs.get('precio_base') is not None:
+            costo_arroyo = max(costo_arroyo, self._to_decimal_or_zero(attrs.get('precio_base')))
+
+        validaciones = [
+            ('precio_mayoreo', 'MAYOREO'),
+            ('precio_publico', 'MENUDEO'),
+        ]
+        for field_name, label in validaciones:
+            if field_name not in attrs and instance is not None:
+                continue
+            precio = self._to_decimal_or_zero(attrs.get(field_name, getattr(instance, field_name, None)))
+            if precio < 0:
+                raise serializers.ValidationError({field_name: f'El precio {label} no puede ser negativo.'})
+            if costo_arroyo > 0 and precio <= costo_arroyo:
+                raise serializers.ValidationError({
+                    field_name: (
+                        f'El precio {label} debe ser mayor al costo para Arroyo '
+                        f'(${costo_arroyo:.2f}).'
+                    )
+                })
+        return attrs
+
 class   ProductoMiniSerializer(BaseSerializer):
     unidad_sat_clave = serializers.CharField(source='unidad_sat.clave', read_only=True)
     unidad_sat_nombre = serializers.CharField(source='unidad_sat.nombre', read_only=True)
@@ -98,18 +138,18 @@ class   ProductoMiniSerializer(BaseSerializer):
 
         
         if not self.context:
-           return float(obj.precio_base)
+           return float(obj.get_precio_menudeo())
         
         cliente_id = self.context.get('cliente_id', None)
         is_compras = self.context.get('is_compras', False)
         if cliente_id:
             try:
                 precio = obj.get_mi_precio_cliente(int(cliente_id))
-                return float(precio) if precio else float(obj.precio_base)
+                return float(precio) if precio else float(obj.get_precio_menudeo())
             except Exception as e:
                 #import traceback
                 #traceback.print_exc()
-                return float(obj.precio_base)
+                return float(obj.get_precio_menudeo())
         if is_compras:
             try:
                 precio = obj.precio_ultima_compra
@@ -120,7 +160,9 @@ class   ProductoMiniSerializer(BaseSerializer):
                 #traceback.print_exc()
                 #return 0.0
        
-        return float(obj.precio_base)
+        # Sin cliente en contexto, por regla de negocio el precio de referencia
+        # para venta debe ser menudeo.
+        return float(obj.get_precio_menudeo())
 
     def get_inventario(self, obj):
         """
@@ -157,6 +199,7 @@ class ProductoInfoSerializer(serializers.Serializer):
     precio_base = serializers.FloatField()
     precio_mayoreo = serializers.FloatField()
     precio_publico = serializers.FloatField()
+    precio_semi_mayoreo = serializers.FloatField()
     ultimo_precio = serializers.FloatField()
 
 
@@ -207,9 +250,10 @@ class ProductoInventarioAlamcenSerializer(serializers.Serializer):
             'categoria': modelo_producto.categoria.nombre if modelo_producto.categoria else None,
             'clave': modelo_producto.unidad_sat.clave if modelo_producto.unidad_sat else None,
             'unidad': modelo_producto.unidad_sat.nombre if modelo_producto.unidad_sat else None,
-            'precio_base': float(modelo_producto.precio_base),
-            'precio_mayoreo': float(modelo_producto.precio_mayoreo),
-            'precio_publico': float(modelo_producto.precio_publico),
+            'precio_base': float(modelo_producto.get_costo_arroyo()),
+            'precio_mayoreo': float(modelo_producto.get_precio_mayoreo()),
+            'precio_publico': float(modelo_producto.get_precio_menudeo()),
+            'precio_semi_mayoreo': float(modelo_producto.get_precio_semi_mayoreo()),
             'ultimo_precio': float(ultimo_precio)
         }
         

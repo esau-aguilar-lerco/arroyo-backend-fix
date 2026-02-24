@@ -485,11 +485,22 @@ class ProductoEmbarqueDetailSerializer(serializers.Serializer):
     def get_precio_unitario(self, obj):
         detalle = self._get_venta_detalle(obj)
         producto = getattr(obj, 'producto', None)
+        precio_menudeo = None
+        precio_costo = None
+        if producto is not None:
+            try:
+                precio_menudeo = producto.get_precio_menudeo()
+            except Exception:
+                precio_menudeo = None
+            try:
+                precio_costo = producto.get_costo_arroyo()
+            except Exception:
+                precio_costo = None
         return self._first_positive_decimal([
             obj.precio_unitario,
             getattr(detalle, 'precio_unitario', None),
-            getattr(producto, 'precio_publico', None),
-            getattr(producto, 'precio_base', None),
+            precio_menudeo,
+            precio_costo,
         ], decimal_places=2)
 
     def get_cantidad_cargada(self, obj):

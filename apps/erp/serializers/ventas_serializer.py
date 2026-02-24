@@ -152,12 +152,25 @@ class VentaDetalleSerializer(serializers.ModelSerializer):
         """
         cantidad = data.get('cantidad', 0)
         precio = data.get('precio_unitario', 0)
+        producto = data.get('producto')
         
         if cantidad <= 0:
             raise serializers.ValidationError("La cantidad debe ser mayor a 0.")
         
         if precio < 0:
             raise serializers.ValidationError("El precio unitario no puede ser negativo.")
+
+        # Regla general de precio: venta nunca igual o menor al costo para Arroyo.
+        if producto and precio is not None:
+            try:
+                costo_arroyo = Decimal(str(producto.get_costo_arroyo() or 0))
+            except Exception:
+                costo_arroyo = Decimal('0.00')
+            precio_decimal = Decimal(str(precio))
+            if costo_arroyo > 0 and precio_decimal <= costo_arroyo:
+                raise serializers.ValidationError(
+                    f"El precio unitario de venta debe ser mayor al costo para Arroyo (${costo_arroyo:.2f})."
+                )
         
         return data
 

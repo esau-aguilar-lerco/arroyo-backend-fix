@@ -190,6 +190,35 @@ class ClienteSerializer(BaseSerializer):
         # Lógica para determinar si el cliente puede pagar a crédito
         return obj.puede_pagar_credito()
 
+    def to_internal_value(self, data):
+        """
+        Compatibilidad con frontend:
+        aceptar aliases de precio_tipo y normalizar a los valores canónicos del modelo
+        antes de que ChoiceField valide.
+        """
+        try:
+            payload = data.copy()
+        except Exception:
+            payload = dict(data)
+
+        precio_tipo_raw = payload.get('precio_tipo')
+        if precio_tipo_raw is not None:
+            precio_tipo = str(precio_tipo_raw).strip().upper()
+            aliases_precio = {
+                'MENUDEO': Cliente.PUBLICO,
+                'PUBLICO': Cliente.PUBLICO,
+                'PÚBLICO': Cliente.PUBLICO,
+                'PUB': Cliente.PUBLICO,
+                'MAYOREO': Cliente.MAYOREO,
+                'SEMI MAYOREO': Cliente.SEMI_MAYOREO,
+                'SEMIMAYOREO': Cliente.SEMI_MAYOREO,
+                'SEMI_MAYOREO': Cliente.SEMI_MAYOREO,
+            }
+            if precio_tipo in aliases_precio:
+                payload['precio_tipo'] = aliases_precio[precio_tipo]
+
+        return super().to_internal_value(payload)
+
     def get_clasificacion_name(self, obj):
         return obj.clasificacion.nombre if obj.clasificacion else None
 

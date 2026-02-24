@@ -201,26 +201,6 @@ def _inventario_desde_embarque(
         if search_l and search_l not in (producto.nombre or '').lower():
             continue
 
-        item = productos_map.get(producto.id)
-        if item is None:
-            item = {
-                'producto_id': producto.id,
-                'codigo': producto.codigo,
-                'producto_nombre': producto.nombre,
-                'cantidad_total': Decimal('0.000'),
-                'valor_total': Decimal('0.00'),
-                'precio_publico': _to_decimal_or_zero(getattr(producto, 'precio_publico', None)) if puede_ver_costos else Decimal('0.00'),
-                'precio_base': _to_decimal_or_zero(getattr(producto, 'precio_base', None)) if puede_ver_costos else Decimal('0.00'),
-                'precio_unitario': Decimal('0.00'),
-                'numero_lotes': 0,
-                'unidad_medida': producto.unidad_sat.nombre if getattr(producto, 'unidad_sat', None) else None,
-                'unidad_clave': producto.unidad_sat.clave if getattr(producto, 'unidad_sat', None) else None,
-                'ultima_actualizacion': prod_emb.updated_at,
-                'lotes_relacionados': [],
-                '_lotes_ids': set(),
-            }
-            productos_map[producto.id] = item
-
         cantidad_cargada = _to_decimal_or_zero(prod_emb.cantidad)
         cantidad = cantidad_cargada
         if prod_emb.tipo == ProductoEmbarque.PEDIDO and prod_emb.preventa_id:
@@ -243,14 +223,54 @@ def _inventario_desde_embarque(
         if cantidad <= 0:
             continue
 
+        item = productos_map.get(producto.id)
+        if item is None:
+            precio_publico = Decimal('0.00')
+            precio_base = Decimal('0.00')
+            if puede_ver_costos:
+                try:
+                    precio_publico = _to_decimal_or_zero(producto.get_precio_menudeo())
+                except Exception:
+                    precio_publico = _to_decimal_or_zero(getattr(producto, 'precio_publico', None))
+                try:
+                    precio_base = _to_decimal_or_zero(producto.get_costo_arroyo())
+                except Exception:
+                    precio_base = _to_decimal_or_zero(getattr(producto, 'precio_base', None))
+            item = {
+                'producto_id': producto.id,
+                'codigo': producto.codigo,
+                'producto_nombre': producto.nombre,
+                'cantidad_total': Decimal('0.000'),
+                # valor_total se respeta por permisos en la salida, pero acumulamos
+                # un valor real interno para calcular precio_unitario operativo.
+                'valor_total': Decimal('0.00'),
+                '_valor_total_real': Decimal('0.00'),
+                'precio_publico': precio_publico,
+                'precio_base': precio_base,
+                'precio_unitario': Decimal('0.00'),
+                'numero_lotes': 0,
+                'unidad_medida': producto.unidad_sat.nombre if getattr(producto, 'unidad_sat', None) else None,
+                'unidad_clave': producto.unidad_sat.clave if getattr(producto, 'unidad_sat', None) else None,
+                'ultima_actualizacion': prod_emb.updated_at,
+                'lotes_relacionados': [],
+                '_lotes_ids': set(),
+            }
+            productos_map[producto.id] = item
+
         precio_mov = _to_decimal_or_zero(prod_emb.precio_unitario)
         if precio_mov <= 0:
-            precio_mov = _to_decimal_or_zero(getattr(producto, 'precio_base', None))
+            try:
+                precio_mov = _to_decimal_or_zero(producto.get_costo_arroyo())
+            except Exception:
+                precio_mov = _to_decimal_or_zero(getattr(producto, 'precio_base', None))
         if precio_mov <= 0:
-            precio_mov = _to_decimal_or_zero(getattr(producto, 'precio_publico', None))
+            try:
+                precio_mov = _to_decimal_or_zero(producto.get_precio_menudeo())
+            except Exception:
+                precio_mov = _to_decimal_or_zero(getattr(producto, 'precio_publico', None))
 
         item['cantidad_total'] += cantidad
-        item['valor_total'] += (cantidad * precio_mov)
+        item['_valor_total_real'] += (cantidad * precio_mov)
         if prod_emb.updated_at and (not item['ultima_actualizacion'] or prod_emb.updated_at > item['ultima_actualizacion']):
             item['ultima_actualizacion'] = prod_emb.updated_at
 
@@ -276,15 +296,20 @@ def _inventario_desde_embarque(
     productos_list = []
     for item in productos_map.values():
         cantidad_total = _to_decimal_or_zero(item['cantidad_total'])
-        valor_total = _to_decimal_or_zero(item['valor_total']) if puede_ver_costos else Decimal('0.00')
+        valor_total_real = _to_decimal_or_zero(item.get('_valor_total_real'))
+        valor_total = valor_total_real if puede_ver_costos else Decimal('0.00')
         precio_unitario = Decimal('0.00')
-        if puede_ver_costos and cantidad_total > 0:
-            precio_unitario = valor_total / cantidad_total
-            if precio_unitario <= 0:
+        # Precio unitario operativo: sí se muestra para flujo de reparto/app,
+        # aunque el usuario no pueda ver costos globales.
+        if cantidad_total > 0:
+            precio_unitario = valor_total_real / cantidad_total
+            if precio_unitario <= 0 and puede_ver_costos:
                 precio_unitario = item['precio_base'] if item['precio_base'] > 0 else item['precio_publico']
 
         item['precio_unitario'] = precio_unitario
+        item['valor_total'] = valor_total
         item['numero_lotes'] = len(item['_lotes_ids'])
+        del item['_valor_total_real']
         del item['_lotes_ids']
         productos_list.append(item)
 
@@ -1233,12 +1258,28 @@ class InventarioAlmacenAPIView(APIView):
                 lotes_por_producto.setdefault(lote.producto_id, []).append(lote)
 
         # ✅ CONSTRUIR RESPUESTA CON TODOS LOS PRODUCTOS
+        productos_modelo = {
+            p.id: p for p in Producto.objects.filter(
+                id__in=[item['producto_id'] for item in productos_list]
+            ).only('id', 'precio_base', 'precio_publico', 'precio_mayoreo')
+        }
         productos_data = []
         for item in productos_list:
             cantidad_total = _to_decimal_or_zero(item.get('cantidad_total'))
             valor_total = _to_decimal_or_zero(item.get('valor_total')) if puede_ver_costos else Decimal('0')
-            precio_publico = _to_decimal_or_zero(item.get('producto__precio_publico')) if puede_ver_costos else Decimal('0')
-            precio_base = _to_decimal_or_zero(item.get('producto__precio_base')) if puede_ver_costos else Decimal('0')
+            producto_modelo = productos_modelo.get(item['producto_id'])
+            if puede_ver_costos and producto_modelo:
+                try:
+                    precio_publico = _to_decimal_or_zero(producto_modelo.get_precio_menudeo())
+                except Exception:
+                    precio_publico = _to_decimal_or_zero(item.get('producto__precio_publico'))
+                try:
+                    precio_base = _to_decimal_or_zero(producto_modelo.get_costo_arroyo())
+                except Exception:
+                    precio_base = _to_decimal_or_zero(item.get('producto__precio_base'))
+            else:
+                precio_publico = Decimal('0')
+                precio_base = Decimal('0')
 
             precio_unitario = (valor_total / cantidad_total) if cantidad_total > 0 else Decimal('0')
             if precio_unitario <= 0:
@@ -1565,12 +1606,29 @@ class InventarioAlmacenConsultaAPIView(APIView):
                 })
 
         # ✅ CONSTRUIR RESPUESTA CON PRODUCTOS PAGINADOS
+        productos_ids_pagina = [item['producto_id'] for item in productos_paginados]
+        productos_modelo = {
+            p.id: p for p in Producto.objects.filter(id__in=productos_ids_pagina).only(
+                'id', 'precio_base', 'precio_publico', 'precio_mayoreo'
+            )
+        }
         productos_data = []
         for item in productos_paginados:
             cantidad_total = _to_decimal_or_zero(item.get('cantidad_total'))
             valor_total = _to_decimal_or_zero(item.get('valor_total')) if puede_ver_costos else Decimal('0')
-            precio_publico = _to_decimal_or_zero(item.get('producto__precio_publico')) if puede_ver_costos else Decimal('0')
-            precio_base = _to_decimal_or_zero(item.get('producto__precio_base')) if puede_ver_costos else Decimal('0')
+            producto_modelo = productos_modelo.get(item['producto_id'])
+            if puede_ver_costos and producto_modelo:
+                try:
+                    precio_publico = _to_decimal_or_zero(producto_modelo.get_precio_menudeo())
+                except Exception:
+                    precio_publico = _to_decimal_or_zero(item.get('producto__precio_publico'))
+                try:
+                    precio_base = _to_decimal_or_zero(producto_modelo.get_costo_arroyo())
+                except Exception:
+                    precio_base = _to_decimal_or_zero(item.get('producto__precio_base'))
+            else:
+                precio_publico = Decimal('0')
+                precio_base = Decimal('0')
 
             precio_unitario = (valor_total / cantidad_total) if cantidad_total > 0 else Decimal('0')
             if precio_unitario <= 0:
@@ -1772,12 +1830,14 @@ class InventarioProductoAPIView(APIView):
         costo_ultimo_lote = (ultimo_lote.costo_unitario if ultimo_lote else 0) if puede_ver_costos else Decimal('0.00')
         
         # ========== PASO 4: PREPARAR DATOS DEL PRODUCTO ==========
+        precio_publico = Decimal(str(producto.get_precio_menudeo() or 0)) if puede_ver_costos else Decimal('0.00')
+        precio_mayoreo = Decimal(str(producto.get_precio_mayoreo() or 0)) if puede_ver_costos else Decimal('0.00')
         datos_producto = {
             'producto_id': producto.id,
             'producto_nombre': producto.nombre,
             'producto_codigo': producto.codigo or 'Sin código',
-            'precio_publico': (producto.precio_publico or 0) if puede_ver_costos else Decimal('0.00'),
-            'precio_mayoreo': (producto.precio_mayoreo or 0) if puede_ver_costos else Decimal('0.00'),
+            'precio_publico': precio_publico,
+            'precio_mayoreo': precio_mayoreo,
             'costo_ultimo_lote': costo_ultimo_lote,
             'unidad_medida': producto.unidad_sat.nombre if producto.unidad_sat else 'Sin unidad',
             'unidad_clave': producto.unidad_sat.clave if producto.unidad_sat else 'N/A',

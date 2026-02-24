@@ -1,5 +1,6 @@
 from django.db import models
 from django.utils import timezone
+from decimal import Decimal
 
 from apps.base.models import BaseModel, BaseDireccion
 from apps.usuarios.models import Usuario
@@ -157,8 +158,6 @@ class Producto(BaseModel):
     UT_MAYOREO      = 15 / 100
     UT_SEMI_MAYOREO = 20 / 100
     UT_MENUDEO      = 25 / 100
-    
-    CANT_AUMENTO = 5.0
 
     codigo = models.CharField(max_length=30, unique=True, verbose_name="Código", blank=True, null=True)
     nombre = models.CharField(max_length=150, verbose_name="Nombre", blank=False, null=False)
@@ -256,13 +255,21 @@ class Producto(BaseModel):
                 return self.get_precio_menudeo()
 
     def get_precio_mayoreo(self):
-        return round(self.get_precio_unitario() * (1 + self.UT_MAYOREO), 2) + self.CANT_AUMENTO
+        costo = self.get_costo_arroyo()
+        recomendado = self._round_money(costo * Decimal(str(1 + self.UT_MAYOREO)))
+        capturado = self._to_decimal_or_zero(self.precio_mayoreo)
+        return float(self._resolver_precio_editable(capturado, costo, recomendado))
     
     def get_precio_semi_mayoreo(self):
-        return round(self.get_precio_unitario() * (1 + self.UT_SEMI_MAYOREO), 2) + self.CANT_AUMENTO
+        costo = self.get_costo_arroyo()
+        recomendado = self._round_money(costo * Decimal(str(1 + self.UT_SEMI_MAYOREO)))
+        return float(self._resolver_precio_editable(None, costo, recomendado))
 
     def get_precio_menudeo(self):
-        return round(self.get_precio_unitario() * (1 + self.UT_MENUDEO), 2) + self.CANT_AUMENTO
+        costo = self.get_costo_arroyo()
+        recomendado = self._round_money(costo * Decimal(str(1 + self.UT_MENUDEO)))
+        capturado = self._to_decimal_or_zero(self.precio_publico)
+        return float(self._resolver_precio_editable(capturado, costo, recomendado))
 
 
     def get_precio_unitario(self):
@@ -271,20 +278,67 @@ class Producto(BaseModel):
         Calcula el precio unitario ponderado:
         (C1*Q1 + C2*Q2 + ... + Cn*Qn) / (Q1 + Q2 + ... + Qn)
         """
+        return float(self.get_costo_arroyo())
+
+    def _to_decimal_or_zero(self, value):
+        if value is None:
+            return Decimal('0.00')
+        if isinstance(value, Decimal):
+            return value
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return Decimal('0.00')
+
+    def _round_money(self, value):
+        return self._to_decimal_or_zero(value).quantize(Decimal('0.01'))
+
+    def _resolver_precio_editable(self, capturado, costo, recomendado):
+        """
+        Regla de negocio:
+        - Si existe precio capturado por administración y es > costo, se respeta.
+        - Si el capturado es inválido (<= costo), se usa recomendado.
+        - Nunca regresar <= costo.
+        """
+        costo = self._round_money(costo)
+        recomendado = self._round_money(recomendado)
+        capturado = self._to_decimal_or_zero(capturado)
+
+        if capturado > costo:
+            return self._round_money(capturado)
+
+        if recomendado > costo:
+            return recomendado
+
+        # Fallback defensivo: asegurar que el precio final quede por arriba del costo.
+        return self._round_money(costo + Decimal('0.01'))
+
+    def get_costo_arroyo(self):
+        """
+        Costo para Arroyo:
+        promedio ponderado de las últimas N compras:
+        sum(precio_unitario * cantidad_entrada) / sum(cantidad_entrada)
+        """
         ultimas_compras = self._get_ultimas_compras(self.NUMERO_COMPRAS)
         if not ultimas_compras:
-            return float(self.precio_ultima_compra)
+            return self._round_money(self.precio_ultima_compra)
 
-        suma_q = 0
-        suma_producto_precio = 0
+        suma_q = Decimal('0.00')
+        suma_producto_precio = Decimal('0.00')
 
         for compra in ultimas_compras:
-            precio = float(compra.get('precio_unitario', 0))
-            cantidad = float(compra.get('cantidad_entrada', 0))
+            precio = self._to_decimal_or_zero(compra.get('precio_unitario', 0))
+            cantidad = self._to_decimal_or_zero(
+                compra.get('cantidad_entrada', compra.get('cantidad', 0))
+            )
+            if cantidad <= 0:
+                continue
             suma_producto_precio += precio * cantidad
             suma_q += cantidad
 
-        return float(round(suma_producto_precio / suma_q, 2)) if suma_q else float(self.precio_ultima_compra)
+        if suma_q <= 0:
+            return self._round_money(self.precio_ultima_compra)
+        return self._round_money(suma_producto_precio / suma_q)
 
 
     def _get_ultimas_compras(self, n=3):
