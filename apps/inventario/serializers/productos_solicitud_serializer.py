@@ -17,7 +17,7 @@ class ProductosSolicitudMiniSerializer(BaseSerializer):
     unidad_sat_clave = serializers.CharField(source='producto.unidad_sat.clave', read_only=True)
     unidad_sat_nombre = serializers.CharField(source='producto.unidad_sat.nombre', read_only=True)  
     tiempo_desde_solicitud = serializers.SerializerMethodField()
-    precio_base = serializers.DecimalField(source='producto.precio_ultima_compra', max_digits=10, decimal_places=2, read_only=True)
+    precio_base = serializers.SerializerMethodField()
     solicitado_por = serializers.CharField(source='created_by.nombre', read_only=True)
     #almacen = serializers.CharField(source='almacen.nombre', read_only=True)
     almacen_origen = serializers.SerializerMethodField()
@@ -46,6 +46,16 @@ class ProductosSolicitudMiniSerializer(BaseSerializer):
         if obj.almacen:
             return obj.almacen.nombre
         return ''
+
+    def get_precio_base(self, obj):
+        """Costo para Arroyo por regla global (promedio ponderado de últimas compras)."""
+        producto = getattr(obj, 'producto', None)
+        if not producto:
+            return Decimal('0.00')
+        try:
+            return Decimal(str(producto.get_costo_arroyo() or 0)).quantize(Decimal('0.01'))
+        except Exception:
+            return Decimal('0.00')
     
 
 class ProductosSolicitudSerializer(BaseSerializer):

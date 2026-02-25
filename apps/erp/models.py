@@ -331,8 +331,13 @@ class Producto(BaseModel):
     def get_costo_arroyo(self):
         """
         Costo para Arroyo:
-        promedio ponderado de las últimas N compras:
-        sum(precio_unitario * cantidad_entrada) / sum(cantidad_entrada)
+        promedio ponderado de las últimas N compras finalizadas:
+        sum(precio_unitario * cantidad_real) / sum(cantidad_real)
+
+        cantidad_real:
+        - Si cantidad_entrada > 0, se usa cantidad_entrada (lo realmente aceptado).
+        - Si existe_diferencia y cantidad_entrada == 0, se omite (no entró inventario).
+        - En registros legacy sin cantidad_entrada, usa cantidad solicitada.
         """
         ultimas_compras = self._get_ultimas_compras(self.NUMERO_COMPRAS)
         if not ultimas_compras:
@@ -343,9 +348,19 @@ class Producto(BaseModel):
 
         for compra in ultimas_compras:
             precio = self._to_decimal_or_zero(compra.get('precio_unitario', 0))
-            cantidad = self._to_decimal_or_zero(
-                compra.get('cantidad_entrada', compra.get('cantidad', 0))
-            )
+            cantidad_entrada = self._to_decimal_or_zero(compra.get('cantidad_entrada', 0))
+            cantidad_solicitada = self._to_decimal_or_zero(compra.get('cantidad', 0))
+            existe_diferencia = bool(compra.get('existe_diferencia', False))
+
+            if cantidad_entrada > 0:
+                cantidad = cantidad_entrada
+            elif existe_diferencia:
+                # Compra con diferencia y sin entrada efectiva: no debe afectar costo.
+                cantidad = Decimal('0.00')
+            else:
+                # Fallback legacy: antes no se persistía cantidad_entrada.
+                cantidad = cantidad_solicitada
+
             if cantidad <= 0:
                 continue
             suma_producto_precio += precio * cantidad
@@ -369,9 +384,14 @@ class Producto(BaseModel):
             ]
         """
         return list(CompraDetalle.objects.filter(
-            producto=self
-        ).order_by('-compra__created_at')[:n].values(
-            'precio_unitario', 'cantidad', 'cantidad_entrada'
+            producto=self,
+            compra__status_model=BaseModel.STATUS_MODEL_ACTIVE,
+            compra__estado=Compra.FINALIZADA,
+        ).order_by('-compra__created_at', '-id')[:n].values(
+            'precio_unitario',
+            'cantidad',
+            'cantidad_entrada',
+            'existe_diferencia',
         ))
 # =================================================================
 #                    ALAMCEN

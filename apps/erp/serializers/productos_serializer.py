@@ -184,9 +184,9 @@ class   ProductoMiniSerializer(BaseSerializer):
                 return float(obj.get_precio_menudeo())
         if is_compras:
             try:
-                precio = obj.precio_ultima_compra
-                return float(precio) if precio else float(obj.get_costo_arroyo())
-            except Exception as e:
+                # Regla global: precio base = costo para Arroyo (promedio ponderado últimas compras).
+                return float(obj.get_costo_arroyo())
+            except Exception:
                 return float(obj.get_costo_arroyo())
                 #import traceback
                 #traceback.print_exc()
