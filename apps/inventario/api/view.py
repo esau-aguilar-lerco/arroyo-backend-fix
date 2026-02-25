@@ -1830,7 +1830,14 @@ class InventarioProductoAPIView(APIView):
         costo_ultimo_lote = (ultimo_lote.costo_unitario if ultimo_lote else 0) if puede_ver_costos else Decimal('0.00')
         
         # ========== PASO 4: PREPARAR DATOS DEL PRODUCTO ==========
-        precio_unitario = Decimal(str(producto.get_precio_unitario() or 0)) if puede_ver_costos else Decimal('0.00')
+        precio_base = Decimal(str(producto.get_costo_arroyo() or 0)) if puede_ver_costos else Decimal('0.00')
+        cantidad_total_global = Decimal(str(totales_globales['cantidad_total_global'] or 0))
+        valor_total_global = Decimal(str(totales_globales['valor_total_global'] or 0)) if puede_ver_costos else Decimal('0.00')
+        precio_unitario = Decimal('0.00')
+        if puede_ver_costos and cantidad_total_global > 0:
+            precio_unitario = (valor_total_global / cantidad_total_global).quantize(Decimal('0.01'))
+        elif puede_ver_costos:
+            precio_unitario = precio_base
         precio_mayoreo_calculado = Decimal(str(producto.get_precio_mayoreo_calculado() or 0)) if puede_ver_costos else Decimal('0.00')
         precio_publico_calculado = Decimal(str(producto.get_precio_menudeo_calculado() or 0)) if puede_ver_costos else Decimal('0.00')
         precio_publico = Decimal(str(producto.get_precio_menudeo() or 0)) if puede_ver_costos else Decimal('0.00')
@@ -1839,7 +1846,7 @@ class InventarioProductoAPIView(APIView):
             'producto_id': producto.id,
             'producto_nombre': producto.nombre,
             'producto_codigo': producto.codigo or 'Sin código',
-            'precio_base': precio_unitario,
+            'precio_base': precio_base,
             'precio_unitario': precio_unitario,
             'precio_mayoreo_calculado': precio_mayoreo_calculado,
             'precio_publico_calculado': precio_publico_calculado,
@@ -1849,7 +1856,7 @@ class InventarioProductoAPIView(APIView):
             'unidad_medida': producto.unidad_sat.nombre if producto.unidad_sat else 'Sin unidad',
             'unidad_clave': producto.unidad_sat.clave if producto.unidad_sat else 'N/A',
             'fecha_consulta': timezone.localtime(timezone.now()).strftime('%Y-%m-%d %H:%M:%S'),
-            'cantidad_total_global': totales_globales['cantidad_total_global'] or 0,
+            'cantidad_total_global': cantidad_total_global,
             'total_almacenes': almacenes_query.count(),
             'total_lotes_global': totales_globales['total_lotes_global'] or 0,
             'almacenes': []
