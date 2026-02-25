@@ -4,6 +4,7 @@ from drf_spectacular.utils import extend_schema_field
 from django.db import models
 from django.core.cache import cache
 from functools import wraps
+from decimal import Decimal
 
 # Import models
 from ..models import  Cliente, DireccionCliente, Venta, VentaDetalle, CategoriaCliente
@@ -323,6 +324,44 @@ class ClienteSerializer(BaseSerializer):
             
         if attrs.get('plazos_semanas') in [None, ""]:
             attrs['plazos_semanas'] = 0
+
+        # Si el tipo sugiere esquema de crédito, activar sujeto_credito por defecto
+        if attrs.get('tipo') == Cliente.TIPO_CREDITO_SEMANAL and 'sujeto_credito' not in attrs:
+            attrs['sujeto_credito'] = True
+
+        sujeto_credito = attrs.get(
+            'sujeto_credito',
+            getattr(self.instance, 'sujeto_credito', False)
+        )
+        limite_credito = attrs.get(
+            'limite_credito',
+            getattr(self.instance, 'limite_credito', 0)
+        )
+        plazos_semanas = attrs.get(
+            'plazos_semanas',
+            getattr(self.instance, 'plazos_semanas', 0)
+        )
+
+        try:
+            limite_credito_dec = Decimal(str(limite_credito or 0))
+        except Exception:
+            limite_credito_dec = Decimal('0')
+
+        try:
+            plazos_int = int(plazos_semanas or 0)
+        except Exception:
+            plazos_int = 0
+
+        if sujeto_credito:
+            if limite_credito_dec <= 0:
+                raise serializers.ValidationError({
+                    'limite_credito': 'Para sujeto a crédito, el límite de crédito debe ser mayor a 0.'
+                })
+            if plazos_int <= 0:
+                raise serializers.ValidationError({
+                    'plazos_semanas': 'Para sujeto a crédito, los plazos en semanas deben ser mayores a 0.'
+                })
+
         # Normalizar valores entrantes o existentes
         nombre = (attrs.get('nombre') or getattr(self.instance, 'nombre', '')).strip().upper()
         ap = (attrs.get('apellido_paterno') or getattr(self.instance, 'apellido_paterno', '')).strip().upper()

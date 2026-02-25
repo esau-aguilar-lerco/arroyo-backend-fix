@@ -52,7 +52,8 @@ class CreditoCliente(BaseModel):
         if self.pk is None:
             # Cliente define su plazo en semanas; el crédito siempre se guarda en días.
             semanas_plazo = int(self.cliente.plazos_semanas or 0)
-            self.dias_plazo = max(semanas_plazo, 0) * 7
+            # Evitar créditos que nazcan vencidos por plazos en 0.
+            self.dias_plazo = max(semanas_plazo, 1) * 7
             self.fecha_vencimiento = self.fecha + timedelta(days=self.dias_plazo)
             self.actualizar_saldo_cliente_dispersion()
         super().save(*args, **kwargs)

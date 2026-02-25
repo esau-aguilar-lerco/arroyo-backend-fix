@@ -607,19 +607,24 @@ class Cliente(BaseModel):
         return self.get_full_name
 
     def puede_pagar_credito(self, monto=0):
-        
-        #SI M ONTOP ES MAYOR A CERO, ENTONCES PUEDE PAGAR
-        monto = float(monto)
-        if monto > self.total_credito:
-            print(f"El monto {monto} excede el crédito total {self.total_credito}.")
-            return False
-        
+        try:
+            monto = Decimal(str(monto or 0))
+        except Exception:
+            monto = Decimal('0.00')
+        total_credito = Decimal(str(self.total_credito or 0))
+
         if self.sujeto_credito is False:
             print(f"El cliente {self.nombre} no es sujeto a crédito.")
             return False
-        if self.total_credito == 0:
+
+        if total_credito <= Decimal('0.00'):
             print(f"El cliente {self.nombre} no tiene crédito disponible.")
             return False
+
+        if monto > total_credito:
+            print(f"El monto {monto} excede el crédito total {total_credito}.")
+            return False
+
         #from apps.credito.models import CreditoCliente
         creditos_activos = self.creditos.filter(is_pagado=False)
         creditos_vencidos_count = 0
@@ -661,8 +666,27 @@ class Cliente(BaseModel):
         self.nombre = (self.nombre or "").strip().upper()
         self.apellido_materno = (self.apellido_materno or "").strip().upper()
         self.apellido_paterno = (self.apellido_paterno or "").strip().upper()
+
+        if self.limite_credito is None:
+            self.limite_credito = Decimal('0.00')
+        else:
+            self.limite_credito = Decimal(str(self.limite_credito))
+
+        if self.plazos_semanas is None:
+            self.plazos_semanas = 0
+
         if self.pk is None:
-            self.total_credito = self.limite_credito if self.sujeto_credito else 0.00
+            self.total_credito = self.limite_credito if self.sujeto_credito else Decimal('0.00')
+        else:
+            anterior = Cliente.objects.filter(pk=self.pk).only('sujeto_credito', 'total_credito').first()
+            if anterior:
+                if anterior.sujeto_credito is False and self.sujeto_credito is True:
+                    # Al activar crédito en un cliente existente, inicializar saldo disponible.
+                    self.total_credito = self.limite_credito
+                elif anterior.sujeto_credito is True and self.sujeto_credito is False:
+                    self.total_credito = Decimal('0.00')
+                elif self.sujeto_credito and self.total_credito is None:
+                    self.total_credito = self.limite_credito
 
         # Si no hay código, genera uno automáticamente
         if not self.codigo:
