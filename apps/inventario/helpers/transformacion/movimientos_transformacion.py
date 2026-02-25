@@ -107,7 +107,13 @@ def crear_movimiento_transformacion(almacen=None, tipo=None, productos_entrada=[
         pass
     
 def crear_lote_transformacion(almacen=None, producto=None, cantidad=Decimal('0.00'), costo_unitario=Decimal('0.00'), usuario=None):
-    cost_unitario = costo_unitario if costo_unitario and costo_unitario > 0 else Decimal(producto.precio_base)
+    if costo_unitario and costo_unitario > 0:
+        cost_unitario = costo_unitario
+    else:
+        try:
+            cost_unitario = Decimal(str(producto.get_costo_arroyo() or 0))
+        except Exception:
+            cost_unitario = Decimal(str(getattr(producto, 'precio_base', 0) or 0))
     return LoteInventario.objects.create(
         almacen=almacen,
         producto=producto,

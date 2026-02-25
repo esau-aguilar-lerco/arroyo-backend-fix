@@ -256,18 +256,18 @@ class Producto(BaseModel):
 
     def get_precio_mayoreo(self):
         costo = self.get_costo_arroyo()
-        recomendado = self._round_money(costo * Decimal(str(1 + self.UT_MAYOREO)))
+        recomendado = self._round_money(self.get_precio_mayoreo_calculado())
         capturado = self._to_decimal_or_zero(self.precio_mayoreo)
         return float(self._resolver_precio_editable(capturado, costo, recomendado))
     
     def get_precio_semi_mayoreo(self):
         costo = self.get_costo_arroyo()
-        recomendado = self._round_money(costo * Decimal(str(1 + self.UT_SEMI_MAYOREO)))
+        recomendado = self._round_money(self.get_precio_semi_mayoreo_calculado())
         return float(self._resolver_precio_editable(None, costo, recomendado))
 
     def get_precio_menudeo(self):
         costo = self.get_costo_arroyo()
-        recomendado = self._round_money(costo * Decimal(str(1 + self.UT_MENUDEO)))
+        recomendado = self._round_money(self.get_precio_menudeo_calculado())
         capturado = self._to_decimal_or_zero(self.precio_publico)
         return float(self._resolver_precio_editable(capturado, costo, recomendado))
 
@@ -279,6 +279,21 @@ class Producto(BaseModel):
         (C1*Q1 + C2*Q2 + ... + Cn*Qn) / (Q1 + Q2 + ... + Qn)
         """
         return float(self.get_costo_arroyo())
+
+    def get_precio_mayoreo_calculado(self):
+        """Precio MAYOREO sugerido por fórmula (costo para Arroyo + 15%)."""
+        costo = self.get_costo_arroyo()
+        return float(self._round_money(costo * Decimal(str(1 + self.UT_MAYOREO))))
+
+    def get_precio_semi_mayoreo_calculado(self):
+        """Precio SEMI MAYOREO sugerido por fórmula (costo para Arroyo + 20%)."""
+        costo = self.get_costo_arroyo()
+        return float(self._round_money(costo * Decimal(str(1 + self.UT_SEMI_MAYOREO))))
+
+    def get_precio_menudeo_calculado(self):
+        """Precio MENUDEO sugerido por fórmula (costo para Arroyo + 25%)."""
+        costo = self.get_costo_arroyo()
+        return float(self._round_money(costo * Decimal(str(1 + self.UT_MENUDEO))))
 
     def _to_decimal_or_zero(self, value):
         if value is None:

@@ -1830,12 +1830,19 @@ class InventarioProductoAPIView(APIView):
         costo_ultimo_lote = (ultimo_lote.costo_unitario if ultimo_lote else 0) if puede_ver_costos else Decimal('0.00')
         
         # ========== PASO 4: PREPARAR DATOS DEL PRODUCTO ==========
+        precio_unitario = Decimal(str(producto.get_precio_unitario() or 0)) if puede_ver_costos else Decimal('0.00')
+        precio_mayoreo_calculado = Decimal(str(producto.get_precio_mayoreo_calculado() or 0)) if puede_ver_costos else Decimal('0.00')
+        precio_publico_calculado = Decimal(str(producto.get_precio_menudeo_calculado() or 0)) if puede_ver_costos else Decimal('0.00')
         precio_publico = Decimal(str(producto.get_precio_menudeo() or 0)) if puede_ver_costos else Decimal('0.00')
         precio_mayoreo = Decimal(str(producto.get_precio_mayoreo() or 0)) if puede_ver_costos else Decimal('0.00')
         datos_producto = {
             'producto_id': producto.id,
             'producto_nombre': producto.nombre,
             'producto_codigo': producto.codigo or 'Sin código',
+            'precio_base': precio_unitario,
+            'precio_unitario': precio_unitario,
+            'precio_mayoreo_calculado': precio_mayoreo_calculado,
+            'precio_publico_calculado': precio_publico_calculado,
             'precio_publico': precio_publico,
             'precio_mayoreo': precio_mayoreo,
             'costo_ultimo_lote': costo_ultimo_lote,

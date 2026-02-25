@@ -119,6 +119,38 @@ class ProductoSerializer(BaseSerializer):
                 })
         return attrs
 
+    def to_representation(self, instance):
+        """
+        Unifica salida de precios conforme a reglas globales:
+        - precio_base => costo para Arroyo (ponderado)
+        - precio_mayoreo / precio_publico => precios finales vigentes (editables)
+        - *_calculado => precios sugeridos por fórmula
+        """
+        data = super().to_representation(instance)
+        try:
+            costo = float(instance.get_costo_arroyo())
+            data['precio_base'] = costo
+            data['precio_unitario'] = costo
+        except Exception:
+            pass
+        try:
+            data['precio_mayoreo_calculado'] = float(instance.get_precio_mayoreo_calculado())
+        except Exception:
+            pass
+        try:
+            data['precio_publico_calculado'] = float(instance.get_precio_menudeo_calculado())
+        except Exception:
+            pass
+        try:
+            data['precio_mayoreo'] = float(instance.get_precio_mayoreo())
+        except Exception:
+            pass
+        try:
+            data['precio_publico'] = float(instance.get_precio_menudeo())
+        except Exception:
+            pass
+        return data
+
 class   ProductoMiniSerializer(BaseSerializer):
     unidad_sat_clave = serializers.CharField(source='unidad_sat.clave', read_only=True)
     unidad_sat_nombre = serializers.CharField(source='unidad_sat.nombre', read_only=True)
@@ -153,9 +185,9 @@ class   ProductoMiniSerializer(BaseSerializer):
         if is_compras:
             try:
                 precio = obj.precio_ultima_compra
-                return float(precio) if precio else obj.precio_base
+                return float(precio) if precio else float(obj.get_costo_arroyo())
             except Exception as e:
-                return float(obj.precio_base)
+                return float(obj.get_costo_arroyo())
                 #import traceback
                 #traceback.print_exc()
                 #return 0.0
@@ -196,9 +228,13 @@ class ProductoInfoSerializer(serializers.Serializer):
     categoria = serializers.CharField(allow_null=True)
     clave = serializers.CharField(allow_null=True)
     unidad = serializers.CharField(allow_null=True)
+    precio_unitario = serializers.FloatField()
     precio_base = serializers.FloatField()
+    precio_mayoreo_calculado = serializers.FloatField()
     precio_mayoreo = serializers.FloatField()
+    precio_semi_mayoreo_calculado = serializers.FloatField()
     precio_publico = serializers.FloatField()
+    precio_publico_calculado = serializers.FloatField()
     precio_semi_mayoreo = serializers.FloatField()
     ultimo_precio = serializers.FloatField()
 
@@ -250,9 +286,13 @@ class ProductoInventarioAlamcenSerializer(serializers.Serializer):
             'categoria': modelo_producto.categoria.nombre if modelo_producto.categoria else None,
             'clave': modelo_producto.unidad_sat.clave if modelo_producto.unidad_sat else None,
             'unidad': modelo_producto.unidad_sat.nombre if modelo_producto.unidad_sat else None,
+            'precio_unitario': float(modelo_producto.get_precio_unitario()),
             'precio_base': float(modelo_producto.get_costo_arroyo()),
+            'precio_mayoreo_calculado': float(modelo_producto.get_precio_mayoreo_calculado()),
             'precio_mayoreo': float(modelo_producto.get_precio_mayoreo()),
+            'precio_semi_mayoreo_calculado': float(modelo_producto.get_precio_semi_mayoreo_calculado()),
             'precio_publico': float(modelo_producto.get_precio_menudeo()),
+            'precio_publico_calculado': float(modelo_producto.get_precio_menudeo_calculado()),
             'precio_semi_mayoreo': float(modelo_producto.get_precio_semi_mayoreo()),
             'ultimo_precio': float(ultimo_precio)
         }
