@@ -394,6 +394,35 @@ class VentaSerializer(BaseSerializer):
             validated_data['almacen'] = ruta_usuario.almacen
             almacen = ruta_usuario.almacen
 
+        # Regla para ventas desde ruta/app:
+        # el precio unitario se toma del tipo de precio del cliente (backend autoritativo),
+        # evitando depender del valor enviado por el cliente móvil.
+        cliente_venta = validated_data.get('cliente')
+        if (
+            ruta_usuario
+            and fase_venta in [Venta.FASE_VENTA_COMANDA, Venta.FASE_TERMINADA, Venta.FASE_EN_PROCESO]
+            and cliente_venta
+            and detalles_data
+        ):
+            for detalle_data in detalles_data:
+                producto_detalle = detalle_data.get('producto')
+                if not producto_detalle:
+                    continue
+                try:
+                    precio_cliente = Decimal(
+                        str(producto_detalle.get_mi_precio_cliente(cliente_venta.id) or 0)
+                    ).quantize(Decimal('0.01'))
+                except Exception:
+                    try:
+                        precio_cliente = Decimal(
+                            str(producto_detalle.get_precio_menudeo() or 0)
+                        ).quantize(Decimal('0.01'))
+                    except Exception:
+                        precio_cliente = Decimal('0.00')
+
+                if precio_cliente > 0:
+                    detalle_data['precio_unitario'] = precio_cliente
+
         if fase_venta in [Venta.FASE_VENTA_COMANDA, Venta.FASE_TERMINADA] and not almacen:
             almacen = getattr(request.user, 'almacen', None) if request else None
             if not almacen:

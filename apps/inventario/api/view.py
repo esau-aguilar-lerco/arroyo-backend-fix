@@ -68,6 +68,12 @@ def _puede_ver_costos(user):
     if getattr(user, 'is_superuser', False) or getattr(user, 'is_staff', False):
         return True
 
+    # Regla operativa: perfiles de ruta pueden ver precios en su inventario
+    # para operar ventas/reparto desde app.
+    almacen_usuario = getattr(user, 'almacen', None)
+    if almacen_usuario and getattr(almacen_usuario, 'tipo', None) == Almacen.TIPO_RUTA:
+        return True
+
     try:
         grupos = {g.name.upper() for g in user.groups.all()}
     except Exception:
