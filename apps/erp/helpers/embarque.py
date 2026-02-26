@@ -44,27 +44,12 @@ def crear_movimiento_inventario_almacen_embarque(ruta=None, pedidos=None, produc
     productos_tara = _validar_lotes_producto(productos_tara, almacen_origen, vacio_permitido=True)
     pedidos = _validar_lotes_producto_pedido(pedidos, almacen_origen)
     
-    #**********************************************
-    #MOVIMEINTOS TARA
-    model_mov_salida = _crear_movimiento_tara(
-        almacen=almacen_origen,
-        almacen_destino=almacen_tara,
-        productos_entrada=productos_tara,
-        nota=f"TARA EMBARQUE RUTA {ruta.nombre}",
-        usuario=usuario
-    )
-    productos_movidos = mover_lotes(productos_a_mover=productos_tara, alamcen_destino=almacen_tara, usuario=usuario)
-    model_mov_entrada = _crear_movimiento_tara(
-        almacen=almacen_tara,
-        productos_entrada=productos_movidos,
-        nota=f"TARA EMBARQUE RUTA {ruta.nombre}",
-        usuario=usuario,
-        tipo="ENTRADA"
-    )
-    #**********************************************
-    
-    #----------------------------------------------
-    #MOVIMIENTOS PEDIDOS
+    # ---------------------------------------------
+    # MOVIMIENTOS PEDIDOS
+    # ---------------------------------------------
+    # Importante:
+    # buscar_lotes_para_embarque_fifo() asigna lotes priorizando PEDIDOS y después TARA.
+    # Para evitar inconsistencias de "lote sin inventario" debemos ejecutar en el mismo orden.
     productos_sin_ventas = obtener_productos_sin_venta(pedidos=pedidos)
     model_mov_salida_pedidos = _crear_movimiento_tara(
         almacen=almacen_origen,
@@ -83,7 +68,27 @@ def crear_movimiento_inventario_almacen_embarque(ruta=None, pedidos=None, produc
         usuario=usuario,
         tipo="ENTRADA"
     )
-    #----------------------------------------------
+    # ---------------------------------------------
+
+    # ---------------------------------------------
+    # MOVIMIENTOS TARA
+    # ---------------------------------------------
+    model_mov_salida = _crear_movimiento_tara(
+        almacen=almacen_origen,
+        almacen_destino=almacen_tara,
+        productos_entrada=productos_tara,
+        nota=f"TARA EMBARQUE RUTA {ruta.nombre}",
+        usuario=usuario
+    )
+    productos_movidos = mover_lotes(productos_a_mover=productos_tara, alamcen_destino=almacen_tara, usuario=usuario)
+    model_mov_entrada = _crear_movimiento_tara(
+        almacen=almacen_tara,
+        productos_entrada=productos_movidos,
+        nota=f"TARA EMBARQUE RUTA {ruta.nombre}",
+        usuario=usuario,
+        tipo="ENTRADA"
+    )
+    # ---------------------------------------------
     
     
     #**********************************************
