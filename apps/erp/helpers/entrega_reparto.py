@@ -65,6 +65,9 @@ def registrar_entrega_productos(venta: Venta, productos_entregados: list, usuari
         if not detalle:
             raise ValueError(f"El producto {producto.nombre} no pertenece a la venta {venta.codigo}.")
 
+        # En este flujo la app envía la cantidad entregada acumulada por producto.
+        # Para evitar salidas duplicadas, sólo se mueve el delta pendiente.
+        cantidad_entregada_actual = _to_decimal(detalle.cantidad_entregada)
         cantidad_entregada = _to_decimal(item.get('cantidad_entregada', item.get('cantidad')))
         cantidad_devolucion = _to_decimal(item.get('devolucion', 0))
         observacion_item = (item.get('observacion') or '').strip()
@@ -77,17 +80,25 @@ def registrar_entrega_productos(venta: Venta, productos_entregados: list, usuari
         if cantidad_entregada < 0 or cantidad_devolucion < 0:
             raise ValueError(f"Las cantidades no pueden ser negativas para {producto.nombre}.")
 
+        if cantidad_entregada < cantidad_entregada_actual:
+            raise ValueError(
+                f"La cantidad entregada para {producto.nombre} no puede ser menor "
+                f"a la ya registrada ({cantidad_entregada_actual})."
+            )
+
         if (cantidad_entregada + cantidad_devolucion) > detalle.cantidad:
             raise ValueError(
                 f"La suma entregada + devolución para {producto.nombre} excede la cantidad del pedido."
             )
 
+        cantidad_entrega_delta = cantidad_entregada - cantidad_entregada_actual
+
         # salida por entrega al cliente
-        if cantidad_entregada > 0:
+        if cantidad_entrega_delta > 0:
             lotes_entrega = _buscar_lotes(
                 producto=producto,
                 almacen=almacen_pedido,
-                cantidad_pendiente=cantidad_entregada,
+                cantidad_pendiente=cantidad_entrega_delta,
             )
             _crear_movimiento(
                 lotes=lotes_entrega,
@@ -122,7 +133,10 @@ def registrar_entrega_productos(venta: Venta, productos_entregados: list, usuari
 
         detalle.cantidad_entregada = cantidad_entregada
         # Un detalle se considera atendido cuando lo entregado + devuelto cubre lo solicitado.
-        detalle.is_entregado = ((cantidad_entregada + cantidad_devolucion) >= detalle.cantidad)
+        detalle.is_entregado = (
+            detalle.is_entregado or
+            ((cantidad_entregada + cantidad_devolucion) >= detalle.cantidad)
+        )
         detalle.save(update_fields=['cantidad_entregada', 'is_entregado'])
 
         if cantidad_devolucion > 0 or observacion_item:
