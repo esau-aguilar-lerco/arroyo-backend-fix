@@ -1,8 +1,16 @@
 from decimal import Decimal
 
+from django.db.models import Sum
+
 from apps.base.models import BaseModel
 from apps.erp.models import Venta, VentaDetalle, incidencia, IncidenciaLote, Rutas
-from apps.inventario.models import EmbarqueReparto, LoteInventario, MovimientoInventario, ProductosMovimiento
+from apps.inventario.models import (
+    EmbarqueReparto,
+    LoteInventario,
+    MovimientoInventario,
+    ProductoEmbarque,
+    ProductosMovimiento,
+)
 
 
 def _to_decimal(value):
@@ -64,6 +72,17 @@ def registrar_entrega_productos(venta: Venta, productos_entregados: list, usuari
         detalle = detalles_venta.get(producto.id)
         if not detalle:
             raise ValueError(f"El producto {producto.nombre} no pertenece a la venta {venta.codigo}.")
+        producto_embarque = (
+            embarque.productos
+            .filter(
+                preventa=venta,
+                producto=producto,
+                tipo=ProductoEmbarque.PEDIDO,
+                status_model=BaseModel.STATUS_MODEL_ACTIVE,
+            )
+            .order_by('-id')
+            .first()
+        )
 
         # En este flujo la app envía la cantidad entregada acumulada por producto.
         # Para evitar salidas duplicadas, sólo se mueve el delta pendiente.
@@ -95,11 +114,18 @@ def registrar_entrega_productos(venta: Venta, productos_entregados: list, usuari
 
         # salida por entrega al cliente
         if cantidad_entrega_delta > 0:
-            lotes_entrega = _buscar_lotes(
-                producto=producto,
-                almacen=almacen_pedido,
-                cantidad_pendiente=cantidad_entrega_delta,
-            )
+            if producto_embarque:
+                lotes_entrega = _buscar_lotes_asignados_embarque(
+                    producto_embarque=producto_embarque,
+                    venta=venta,
+                    cantidad_pendiente=cantidad_entrega_delta,
+                )
+            else:
+                lotes_entrega = _buscar_lotes(
+                    producto=producto,
+                    almacen=almacen_pedido,
+                    cantidad_pendiente=cantidad_entrega_delta,
+                )
             _crear_movimiento(
                 lotes=lotes_entrega,
                 almacen=almacen_pedido,
@@ -138,6 +164,9 @@ def registrar_entrega_productos(venta: Venta, productos_entregados: list, usuari
             ((cantidad_entregada + cantidad_devolucion) >= detalle.cantidad)
         )
         detalle.save(update_fields=['cantidad_entregada', 'is_entregado'])
+        if producto_embarque:
+            producto_embarque.cantidad_entregada = cantidad_entregada
+            producto_embarque.save(update_fields=['cantidad_entregada', 'updated_at'])
 
         if cantidad_devolucion > 0 or observacion_item:
             incidencia_lineas.append(
@@ -216,6 +245,67 @@ def _buscar_lotes(producto, almacen, cantidad_pendiente):
     if cantidad_restante > 0:
         raise ValueError(
             f"No hay suficiente stock del producto {producto.nombre}. Faltan {cantidad_restante} unidades."
+        )
+
+    return lotes_a_usar
+
+
+def _buscar_lotes_asignados_embarque(producto_embarque, venta, cantidad_pendiente):
+    """
+    Entrega sólo desde lotes asignados a ese producto en el embarque/venta.
+    Evita que una venta consuma lotes asignados a otra.
+    """
+    cantidad_restante = _to_decimal(cantidad_pendiente)
+    lotes_asignados_qs = producto_embarque.lotes.select_related('lote').order_by('id')
+    lotes_asignados_ids = list(lotes_asignados_qs.values_list('lote_id', flat=True))
+
+    if not lotes_asignados_ids:
+        return _buscar_lotes(
+            producto=producto_embarque.producto,
+            almacen=venta.ruta.almacen_embarque,
+            cantidad_pendiente=cantidad_restante,
+        )
+
+    entregado_por_lote = {
+        row['lote_id']: _to_decimal(row['total'] or 0)
+        for row in (
+            ProductosMovimiento.objects
+            .filter(
+                movimiento__referencia=f"VENTA-{venta.id}",
+                movimiento__movimiento=MovimientoInventario.SALIDA_VENTA,
+                movimiento__status_model=BaseModel.STATUS_MODEL_ACTIVE,
+                status_model=BaseModel.STATUS_MODEL_ACTIVE,
+                producto_id=producto_embarque.producto_id,
+                lote_id__in=lotes_asignados_ids,
+            )
+            .values('lote_id')
+            .annotate(total=Sum('cantidad'))
+        )
+    }
+
+    lotes_a_usar = []
+    for lote_asignado in lotes_asignados_qs:
+        if cantidad_restante <= 0:
+            break
+
+        cantidad_asignada = _to_decimal(lote_asignado.cantidad)
+        cantidad_ya_entregada_lote = entregado_por_lote.get(lote_asignado.lote_id, Decimal('0'))
+        cupo_lote = cantidad_asignada - cantidad_ya_entregada_lote
+        if cupo_lote <= 0:
+            continue
+
+        disponible_real_lote = _to_decimal(lote_asignado.lote.cantidad)
+        cantidad_usar = min(cantidad_restante, cupo_lote, disponible_real_lote)
+        if cantidad_usar <= 0:
+            continue
+
+        lotes_a_usar.append({'lote': lote_asignado.lote, 'cantidad': cantidad_usar})
+        cantidad_restante -= cantidad_usar
+
+    if cantidad_restante > 0:
+        raise ValueError(
+            f"No hay suficiente stock del producto {producto_embarque.producto.nombre}. "
+            f"Faltan {float(cantidad_restante)} unidades."
         )
 
     return lotes_a_usar
