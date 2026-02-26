@@ -416,6 +416,35 @@ Respuesta relevante:
   - `GET /api/embarques-reparto/pedidos-usuario/?fase=PROGRAMADO`
   - `GET /api/embarques-reparto/pedidos-usuario/?fase=REPARTO`
 
+## Paso 1.1. Historial de ventas entregadas (app)
+
+### `GET /api/embarques-reparto/historial-ventas/`
+
+Devuelve pedidos/ventas ya cerrados para mostrar en **Historial de Ventas** en Ionic.
+
+Reglas:
+- Incluye solo ventas de reparto ya atendidas: `is_entregado=true`, `ya_terminada=true` o `fase=TERMINADA`.
+- Para usuario de ruta, filtra automáticamente por sus rutas/embarques.
+- Para admin/staff, permite consulta global con filtros.
+
+Parámetros opcionales:
+- `search`: código preventa, cliente o ruta.
+- `ruta_id`: filtra por ruta.
+- `fecha_inicio`: `YYYY-MM-DD`.
+- `fecha_fin`: `YYYY-MM-DD`.
+- `limit`, `offset`.
+- `sin_paginacion=true`.
+
+Respuesta:
+- `count`, `next`, `previous`, `results`.
+- Por venta incluye: `id`, `codigo`, `fase`, `cliente_*`, `ruta_*`, `total`, `total_pagado`, `is_entregado`, `fecha_terminada`, `embarque_id`, `embarque_fase`, `detalles`.
+
+Ejemplo:
+
+```bash
+curl -sS "$BASE/embarques-reparto/historial-ventas/?limit=20&offset=0" -H "$H_R"
+```
+
 ## Paso 2. Listar pedidos programados (pantalla de carga)
 
 - Llamar `GET /api/embarques/preventas-detalles/?fase=PROGRAMADO`.

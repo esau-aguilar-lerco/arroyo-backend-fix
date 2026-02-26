@@ -11,7 +11,7 @@ from drf_spectacular.utils import extend_schema, inline_serializer, OpenApiParam
 from drf_spectacular.types import OpenApiTypes
 
 from apps.base.models import BaseModel
-from apps.erp.models import Venta, Rutas, Almacen
+from apps.erp.models import Venta, VentaDetalle, Rutas, Almacen
 from apps.erp.serializers.embarque.embarque_serializer import (
     EmbarqueSerializer, EmbarqueMiniSerializer, VentasEmbarqueSubidaRutaSerializer
 )
@@ -1776,3 +1776,253 @@ def listado_pedidos_usuario_reparto(request):
             {'detail': f'Error al obtener pedidos del reparto: {str(e)}'},
             status=status.HTTP_400_BAD_REQUEST
         )
+
+
+@extend_schema(
+    summary="Historial de ventas entregadas por usuario de ruta",
+    description=(
+        "Lista ventas/pedidos ya entregados (fase TERMINADA o is_entregado=true) "
+        "para el usuario de ruta autenticado. "
+        "Pensado para la pantalla móvil de Historial de Ventas."
+    ),
+    parameters=[
+        OpenApiParameter(
+            name='search',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description='Buscar por código de preventa, cliente o ruta',
+            required=False
+        ),
+        OpenApiParameter(
+            name='ruta_id',
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.QUERY,
+            description='Filtrar por ruta específica',
+            required=False
+        ),
+        OpenApiParameter(
+            name='fecha_inicio',
+            type=OpenApiTypes.DATE,
+            location=OpenApiParameter.QUERY,
+            description='Fecha inicial (YYYY-MM-DD) sobre fecha de actualización de la venta',
+            required=False
+        ),
+        OpenApiParameter(
+            name='fecha_fin',
+            type=OpenApiTypes.DATE,
+            location=OpenApiParameter.QUERY,
+            description='Fecha final (YYYY-MM-DD) sobre fecha de actualización de la venta',
+            required=False
+        ),
+        OpenApiParameter(
+            name='limit',
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.QUERY,
+            description='Límite para paginación',
+            required=False
+        ),
+        OpenApiParameter(
+            name='offset',
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.QUERY,
+            description='Offset para paginación',
+            required=False
+        ),
+        OpenApiParameter(
+            name='sin_paginacion',
+            type=OpenApiTypes.BOOL,
+            location=OpenApiParameter.QUERY,
+            description='Si es true, devuelve todos los registros',
+            required=False
+        ),
+    ],
+    responses={200: OpenApiTypes.OBJECT},
+    tags=['Embarque']
+)
+@api_view(['GET'])
+def historial_ventas_usuario_reparto(request):
+    from datetime import datetime
+    from decimal import Decimal
+    from django.db.models import Q, Prefetch
+    from rest_framework.pagination import LimitOffsetPagination
+
+    user = request.user
+    is_admin = bool(getattr(user, 'is_superuser', False) or getattr(user, 'is_staff', False))
+
+    search = (request.query_params.get('search') or '').strip()
+    ruta_id_raw = (request.query_params.get('ruta_id') or '').strip()
+    fecha_inicio_raw = (request.query_params.get('fecha_inicio') or '').strip()
+    fecha_fin_raw = (request.query_params.get('fecha_fin') or '').strip()
+    sin_paginacion = (request.query_params.get('sin_paginacion') or '').lower() == 'true'
+
+    ruta_id = None
+    if ruta_id_raw:
+        if not ruta_id_raw.isdigit():
+            return Response(
+                {'detail': "El parámetro 'ruta_id' debe ser numérico."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        ruta_id = int(ruta_id_raw)
+
+    fecha_inicio = None
+    fecha_fin = None
+    try:
+        if fecha_inicio_raw:
+            fecha_inicio = datetime.strptime(fecha_inicio_raw, '%Y-%m-%d').date()
+        if fecha_fin_raw:
+            fecha_fin = datetime.strptime(fecha_fin_raw, '%Y-%m-%d').date()
+    except ValueError:
+        return Response(
+            {'detail': "Formato de fecha inválido. Usa YYYY-MM-DD."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    embarques_prefetch = EmbarqueReparto.objects.select_related(
+        'ruta',
+        'encargado',
+    ).filter(
+        status_model=BaseModel.STATUS_MODEL_ACTIVE
+    ).order_by('-id')
+
+    if not is_admin:
+        embarques_prefetch = embarques_prefetch.filter(
+            Q(encargado=user) | Q(ruta__asignado=user)
+        )
+
+    if ruta_id:
+        embarques_prefetch = embarques_prefetch.filter(ruta_id=ruta_id)
+
+    ventas_qs = Venta.objects.select_related(
+        'cliente',
+        'ruta'
+    ).prefetch_related(
+        Prefetch(
+            'detalles',
+            queryset=VentaDetalle.objects.select_related(
+                'producto__unidad_sat'
+            ).order_by('id')
+        ),
+        Prefetch(
+            'embarques_ruta',
+            queryset=embarques_prefetch
+        ),
+    ).filter(
+        status_model=BaseModel.STATUS_MODEL_ACTIVE,
+        was_preventa=True,
+        embarques_ruta__status_model=BaseModel.STATUS_MODEL_ACTIVE,
+    ).filter(
+        Q(is_entregado=True) | Q(ya_terminada=True) | Q(fase=Venta.FASE_TERMINADA)
+    ).distinct().order_by('-updated_at', '-id')
+
+    if not is_admin:
+        ventas_qs = ventas_qs.filter(
+            Q(embarques_ruta__encargado=user) | Q(embarques_ruta__ruta__asignado=user)
+        )
+
+    if ruta_id:
+        ventas_qs = ventas_qs.filter(ruta_id=ruta_id)
+
+    if search:
+        for termino in [t for t in search.split() if t]:
+            ventas_qs = ventas_qs.filter(
+                Q(codigo__icontains=termino) |
+                Q(cliente__codigo__icontains=termino) |
+                Q(cliente__nombre__icontains=termino) |
+                Q(cliente__apellido_paterno__icontains=termino) |
+                Q(cliente__apellido_materno__icontains=termino) |
+                Q(ruta__nombre__icontains=termino) |
+                Q(ruta__codigo__icontains=termino)
+            )
+
+    if fecha_inicio:
+        ventas_qs = ventas_qs.filter(updated_at__date__gte=fecha_inicio)
+    if fecha_fin:
+        ventas_qs = ventas_qs.filter(updated_at__date__lte=fecha_fin)
+
+    def _serialize_venta(venta_obj):
+        embarque_rel = None
+        for emb in venta_obj.embarques_ruta.all():
+            if ruta_id and emb.ruta_id != ruta_id:
+                continue
+            embarque_rel = emb
+            break
+
+        detalles = []
+        for detalle in venta_obj.detalles.all():
+            cantidad_programada = detalle.cantidad_logistica or detalle.cantidad or Decimal('0.000')
+            cantidad_entregada = detalle.cantidad_entregada or Decimal('0.000')
+            cantidad_devolucion = Decimal(str(cantidad_programada)) - Decimal(str(cantidad_entregada))
+            if cantidad_devolucion < 0:
+                cantidad_devolucion = Decimal('0.000')
+
+            detalles.append({
+                'id': detalle.id,
+                'producto_id': detalle.producto_id,
+                'producto_codigo': detalle.producto.codigo if detalle.producto else None,
+                'producto_nombre': detalle.producto.nombre if detalle.producto else None,
+                'unidad_medida': (
+                    detalle.producto.unidad_sat.nombre
+                    if detalle.producto and detalle.producto.unidad_sat
+                    else None
+                ),
+                'unidad_clave': (
+                    detalle.producto.unidad_sat.clave
+                    if detalle.producto and detalle.producto.unidad_sat
+                    else None
+                ),
+                'cantidad': cantidad_programada,
+                'cantidad_entregada': cantidad_entregada,
+                'devolucion': cantidad_devolucion,
+                'precio_unitario': detalle.precio_unitario,
+                'subtotal': detalle.subtotal,
+                'is_entregado': bool(detalle.is_entregado),
+            })
+
+        return {
+            'id': venta_obj.id,
+            'codigo': venta_obj.codigo,
+            'fase': Venta.FASE_TERMINADA if venta_obj.is_entregado else venta_obj.fase,
+            'condicion_pago': venta_obj.condicion_pago,
+            'cliente_id': venta_obj.cliente_id,
+            'cliente_nombre': venta_obj.cliente.get_full_name if venta_obj.cliente else None,
+            'ruta_id': venta_obj.ruta_id,
+            'ruta_nombre': venta_obj.ruta.nombre if venta_obj.ruta else None,
+            'ruta_codigo': venta_obj.ruta.codigo if venta_obj.ruta else None,
+            'total': venta_obj.total,
+            'total_pagado': venta_obj.total_pagado,
+            'is_entregado': bool(venta_obj.is_entregado),
+            'fecha_terminada': venta_obj.updated_at,
+            'embarque_id': embarque_rel.id if embarque_rel else None,
+            'embarque_fase': embarque_rel.fase if embarque_rel else None,
+            'productos_count': len(detalles),
+            'detalles': detalles,
+        }
+
+    if sin_paginacion:
+        results = [_serialize_venta(item) for item in ventas_qs]
+        return Response(
+            {
+                'count': len(results),
+                'next': None,
+                'previous': None,
+                'results': results,
+            },
+            status=status.HTTP_200_OK
+        )
+
+    paginator = LimitOffsetPagination()
+    page = paginator.paginate_queryset(ventas_qs, request)
+    if page is not None:
+        results = [_serialize_venta(item) for item in page]
+        return paginator.get_paginated_response(results)
+
+    results = [_serialize_venta(item) for item in ventas_qs]
+    return Response(
+        {
+            'count': len(results),
+            'next': None,
+            'previous': None,
+            'results': results,
+        },
+        status=status.HTTP_200_OK
+    )
