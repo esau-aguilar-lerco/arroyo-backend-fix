@@ -1,5 +1,7 @@
 from rest_framework import serializers
 from decimal import Decimal
+from django.db import transaction
+from django.core.exceptions import ValidationError as DjangoValidationError
 
 
 from apps.erp.models import Venta, VentaDetalle, VentaDetalleLote, Cliente, Almacen, Rutas, PagosVenta
@@ -463,38 +465,43 @@ class VentaSerializer(BaseSerializer):
         )
         validated_data['total'] = total_calculado
 
-        # Crear la venta
-        venta = Venta.objects.create(**validated_data)
-        # Crear detalles
-        for detalle_data in detalles_data:
-            VentaDetalle.objects.create(venta=venta, **detalle_data)
+        try:
+            with transaction.atomic():
+                # Crear la venta
+                venta = Venta.objects.create(**validated_data)
+                # Crear detalles
+                for detalle_data in detalles_data:
+                    VentaDetalle.objects.create(venta=venta, **detalle_data)
 
-        if venta.fase in [Venta.FASE_PRE_VENTA, Venta.FASE_VENTA_COMANDA, Venta.FASE_TERMINADA]:
-            main_crearmovomientos_venta(venta, detalles_data, user=request.user)
-        
-        for pago_data in pagos_data:
-            PagosVenta.objects.create(venta=venta, created_by_id=request.user.id, **pago_data)
-        # 🔑 Recalcular condición de pago según métodos usados
-        total_pagado = sum(
-            Decimal(str(p['monto'])) for p in pagos_data
-        )
-        tiene_credito = any(getattr(p.get('metodo_pago'), 'is_credito', False) for p in pagos_data)
-        tiene_no_credito = any(not getattr(p.get('metodo_pago'), 'is_credito', False) for p in pagos_data)
+                if venta.fase in [Venta.FASE_PRE_VENTA, Venta.FASE_VENTA_COMANDA, Venta.FASE_TERMINADA]:
+                    main_crearmovomientos_venta(venta, detalles_data, user=request.user)
 
-        if tiene_credito and tiene_no_credito:
-            venta.condicion_pago = CondicionPago.CONDICION_MIXTA
-        elif tiene_credito:
-            venta.condicion_pago = CondicionPago.CONDICION_CREDITO
-        else:
-            venta.condicion_pago = (
-                CondicionPago.CONDICION_CONTADO
-                if total_pagado >= venta.total
-                else CondicionPago.CONDICION_CREDITO
-            )
+                for pago_data in pagos_data:
+                    PagosVenta.objects.create(venta=venta, created_by_id=request.user.id, **pago_data)
+                # 🔑 Recalcular condición de pago según métodos usados
+                total_pagado = sum(
+                    Decimal(str(p['monto'])) for p in pagos_data
+                )
+                tiene_credito = any(getattr(p.get('metodo_pago'), 'is_credito', False) for p in pagos_data)
+                tiene_no_credito = any(not getattr(p.get('metodo_pago'), 'is_credito', False) for p in pagos_data)
 
-        venta.save(update_fields=["condicion_pago"])
+                if tiene_credito and tiene_no_credito:
+                    venta.condicion_pago = CondicionPago.CONDICION_MIXTA
+                elif tiene_credito:
+                    venta.condicion_pago = CondicionPago.CONDICION_CREDITO
+                else:
+                    venta.condicion_pago = (
+                        CondicionPago.CONDICION_CONTADO
+                        if total_pagado >= venta.total
+                        else CondicionPago.CONDICION_CREDITO
+                    )
 
-        return venta
+                venta.save(update_fields=["condicion_pago"])
+                return venta
+        except DjangoValidationError as e:
+            if hasattr(e, 'messages') and e.messages:
+                raise serializers.ValidationError({'detail': ' '.join(str(m) for m in e.messages)})
+            raise serializers.ValidationError({'detail': str(e)})
 
         
        

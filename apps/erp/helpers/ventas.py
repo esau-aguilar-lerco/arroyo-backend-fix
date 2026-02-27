@@ -1,8 +1,9 @@
 from apps.erp.models import Venta, VentaDetalle
 from apps.inventario.models import LoteInventario, MovimientoInventario, ProductosMovimiento, Almacen,ProductosSolicitud
 from decimal import Decimal
-from django.db.models import Sum, F
+from django.db.models import Sum
 from django.db import transaction
+from django.core.exceptions import ValidationError
 
 def main_crearmovomientos_venta(model_venta=None, data_detalles=None, user=None):
     almacen = model_venta.almacen
@@ -25,6 +26,7 @@ def main_crearmovomientos_venta(model_venta=None, data_detalles=None, user=None)
             else:
                 items_productos.append({
                     'producto_id': producto.id,
+                    'producto_nombre': producto.nombre,
                     'cantidad': cantidad,
                     'precio_unitario': precio_unitario,
                 })
@@ -52,6 +54,7 @@ def main_crearmovomientos_venta(model_venta=None, data_detalles=None, user=None)
         else:
             productos_sin_stock.append({
                 'producto_id': producto,
+                'producto_nombre': item.get('producto_nombre', ''),
                 'cantidad_requerida': cantidad_requerida,
                 'cantidad_disponible': stock_disponible,
                 'faltante': abs(diferencia)
@@ -74,6 +77,18 @@ def main_crearmovomientos_venta(model_venta=None, data_detalles=None, user=None)
         return  # ⬅️ salida temprana
 
     # ✅ SOLO COMANDA / TERMINADA afectan inventario
+    # Si no hay stock suficiente en estas fases se debe detener la venta.
+    if FASE in [Venta.FASE_VENTA_COMANDA, Venta.FASE_TERMINADA] and productos_sin_stock:
+        mensajes = []
+        for producto in productos_sin_stock:
+            nombre = producto.get('producto_nombre') or f"ID {producto.get('producto_id')}"
+            mensajes.append(
+                f"No hay suficiente stock del producto {nombre}. "
+                f"Disponible: {Decimal(str(producto['cantidad_disponible'])):.3f}, "
+                f"requerido: {Decimal(str(producto['cantidad_requerida'])):.3f}."
+            )
+        raise ValidationError(mensajes)
+
     if productos_con_stock:
         lotes_afectados, lotes_completos_cero = afectar_lotes_inventario_venta_f_expressions(
             dict_productos=productos_con_stock,
@@ -99,7 +114,9 @@ def main_crearmovomientos_venta(model_venta=None, data_detalles=None, user=None)
 @transaction.atomic  
 def afectar_lotes_inventario_venta_f_expressions(dict_productos=None, almacen=None, user_id=None,fase =Venta.FASE_PRE_VENTA):
     """
-    Versión con F() expressions - actualiza directamente en DB sin cargar en memoria
+    Asigna lotes por FIFO para la venta, sin descontar cantidades.
+    El descuento real se ejecuta en ProductosMovimiento.save() al crear
+    los movimientos de salida (evita doble afectación).
     """
     if not dict_productos:
         return [], []
@@ -131,36 +148,6 @@ def afectar_lotes_inventario_venta_f_expressions(dict_productos=None, almacen=No
             # Calcular cuánto tomar
             cantidad_a_tomar = min(cantidad_restante, cantidad_disponible)
             #print(f"cantidad_a_tomar: {cantidad_a_tomar} de lote {lote.id} (disponible: {cantidad_disponible})")
-            nueva_cantidad = cantidad_disponible - cantidad_a_tomar
-            #print(f"nueva_cantidad: {nueva_cantidad}")
-            
-            # Verificar si el lote quedará en cero
-            if nueva_cantidad == 0 :#and fase == Venta.FASE_PRE_VENTA:
-                # Para lotes que quedan en cero: moverlos al almacén HELP sin afectar cantidad
-                lote.status_model = LoteInventario.STATUS_MODEL_ACTIVE
-                lote.updated_by_id = user_id
-                lote.cantidad = lote.cantidad - cantidad_a_tomar  # Esto dejará la cantidad en 0
-                lote.save(update_fields=['status_model', 'updated_by_id', 'cantidad'])
-                lotes_completos_cero.append(lote.id)
-                #print(f"[LOTE CERO] Lote {lote.id}: se moverá completo al HELP CEDIS")
-            else:
-                #pass
-                #print("ENTRO A REDUCIR CANTIDAD")
-                # Para lotes que NO quedan en cero: reducir cantidad normalmente
-                filas_actualizadas = LoteInventario.objects.filter(
-                    id=lote.id,
-                    cantidad__gte=cantidad_a_tomar  # Verificar que aún tenga suficiente
-                ).update(
-                    cantidad=F('cantidad') - cantidad_a_tomar,
-                    updated_by_id=user_id
-                )
-            
-                if filas_actualizadas == 0:
-                    print(f"[ERROR] Lote {lote.id}: no se pudo actualizar (posible concurrencia)")
-                    continue
-                    
-                #print(f"[LOTE PARCIAL] Lote {lote.id}: -{cantidad_a_tomar}, queda: {nueva_cantidad}")
-            
             # Registrar el lote afectado
             lotes_afectados.append({
                 'lote_id': lote.id,
@@ -173,7 +160,10 @@ def afectar_lotes_inventario_venta_f_expressions(dict_productos=None, almacen=No
         
         # Verificar si se pudo cubrir toda la cantidad requerida
         if cantidad_restante > 0:
-            print(f"[ADVERTENCIA] Producto {producto_id}: faltan {cantidad_restante} unidades")
+            raise ValidationError(
+                f"No hay suficiente inventario para el producto {producto_id}. "
+                f"Faltan {cantidad_restante:.3f} unidades."
+            )
     #print(f"[HELP VENTAS] Lotes afectados: {lotes_afectados}")
     #print(f"[HELP VENTAS] Lotes completos en cero: {lotes_completos_cero}")
     return lotes_afectados, lotes_completos_cero
