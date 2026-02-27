@@ -225,15 +225,16 @@ def registrar_entrega_productos(venta: Venta, productos_entregados: list, usuari
     }
 
 
-def _buscar_lotes(producto, almacen, cantidad_pendiente):
+def _buscar_lotes(producto, almacen, cantidad_pendiente, lote_ids_excluir=None):
     cantidad_pendiente = float(cantidad_pendiente)
+    lote_ids_excluir = lote_ids_excluir or []
 
     lote_completo = LoteInventario.objects.filter(
         producto=producto,
         almacen=almacen,
         cantidad__gte=cantidad_pendiente,
         status_model=LoteInventario.STATUS_MODEL_ACTIVE,
-    ).order_by('cantidad', 'created_at').first()
+    ).exclude(id__in=lote_ids_excluir).order_by('cantidad', 'created_at').first()
 
     if lote_completo:
         return [{'lote': lote_completo, 'cantidad': Decimal(str(cantidad_pendiente))}]
@@ -243,7 +244,7 @@ def _buscar_lotes(producto, almacen, cantidad_pendiente):
         almacen=almacen,
         cantidad__gt=0,
         status_model=LoteInventario.STATUS_MODEL_ACTIVE,
-    ).order_by('created_at')
+    ).exclude(id__in=lote_ids_excluir).order_by('created_at')
 
     lotes_a_usar = []
     cantidad_restante = cantidad_pendiente
@@ -297,6 +298,7 @@ def _buscar_lotes_asignados_embarque(producto_embarques, venta, cantidad_pendien
         lote.id: lote
         for lote in LoteInventario.objects.filter(
             id__in=lotes_asignados_ids,
+            almacen=venta.ruta.almacen_embarque,
             status_model=BaseModel.STATUS_MODEL_ACTIVE,
         )
     }
@@ -342,10 +344,17 @@ def _buscar_lotes_asignados_embarque(producto_embarques, venta, cantidad_pendien
         cantidad_restante -= cantidad_usar
 
     if cantidad_restante > 0:
-        raise ValueError(
-            f"No hay suficiente stock del producto {producto.nombre}. "
-            f"Faltan {float(cantidad_restante)} unidades."
+        # Fallback defensivo: si por alguna inconsistencia histórica los lotes
+        # asignados no alcanzan físicamente, intentar completar desde otros
+        # lotes del mismo almacén de pedidos sin reutilizar los asignados.
+        lotes_extra = _buscar_lotes(
+            producto=producto,
+            almacen=venta.ruta.almacen_embarque,
+            cantidad_pendiente=cantidad_restante,
+            lote_ids_excluir=lotes_asignados_ids,
         )
+        lotes_a_usar.extend(lotes_extra)
+        cantidad_restante = Decimal('0')
 
     return lotes_a_usar
 

@@ -60,6 +60,7 @@ def crear_movimiento_inventario_almacen_embarque(ruta=None, pedidos=None, produc
         tipo="SALIDA"
     )
     productos_movidos_ped = mover_lotes(productos_a_mover=productos_sin_ventas, alamcen_destino=almacen_pedidos, usuario=usuario)
+    pedidos = _asignar_lotes_movidos_a_pedidos(pedidos, productos_movidos_ped)
     
     model_mov_entrada_pedidos = _crear_movimiento_tara(
         almacen=almacen_pedidos,
@@ -283,18 +284,33 @@ def mover_lotes(productos_a_mover = [],alamcen_destino=None,usuario=None):
         lotes = producto_data.get('lotes', [])
         for lote_data in lotes:
             lote = lote_data.get('lote')
-            cantidad_lote = Decimal(str(lote_data.get('cantidad')))
+            cantidad_lote = _dqty(lote_data.get('cantidad'))
+            if cantidad_lote <= 0:
+                continue
             
             # Recargar el lote de la DB para obtener la cantidad actualizada
             lote.refresh_from_db()
-            cantidad_actual = Decimal(str(lote.cantidad))
-            
+            cantidad_actual = _dqty(lote.cantidad)
+            if cantidad_actual <= 0:
+                raise ValueError(
+                    f"El lote {lote.id} ya no tiene inventario disponible al momento de cargar el embarque."
+                )
+
+            # Si el lote cambió de cantidad entre la reserva inicial y el movimiento,
+            # es más seguro abortar para no dejar asignaciones inconsistentes.
+            if cantidad_lote > (cantidad_actual + QTY_3):
+                raise ValueError(
+                    f"El lote {lote.id} cambió de disponibilidad durante la carga. "
+                    f"Disponible: {cantidad_actual}, requerido: {cantidad_lote}"
+                )
+
             if cantidad_lote >= cantidad_actual:
                 # El lote se mueve completo (o lo que queda)
                 lote.almacen = alamcen_destino
                 lote.save()
                 lote_main = lote
                 lotes_afectados.append(lote)
+                cantidad_movida = _dqty(cantidad_actual)
             else:
                 # Crear un nuevo lote con la cantidad a mover
                 nuevo_lote = LoteInventario.objects.create(
@@ -313,10 +329,63 @@ def mover_lotes(productos_a_mover = [],alamcen_destino=None,usuario=None):
                 lote.save()
                 lote_main = nuevo_lote
                 lotes_afectados.append(nuevo_lote)
+                cantidad_movida = _dqty(cantidad_lote)
             
-            dictionario_lote['lotes'].append({'lote': lote_main, 'cantidad': _dqty(cantidad_lote)})
+            dictionario_lote['lotes'].append({'lote': lote_main, 'cantidad': cantidad_movida})
         productos_new.append(dictionario_lote)
     return productos_new
+
+
+def _asignar_lotes_movidos_a_pedidos(pedidos, productos_movidos):
+    """
+    Reemplaza los lotes reservados por los lotes realmente movidos al almacén de pedidos.
+    Evita que ProductoEmbarque/LoteProductoEmbarque apunten a lotes del almacén origen.
+    """
+    pedidos = pedidos or []
+    productos_movidos = productos_movidos or []
+    total_lineas = sum(len(pedido.get('productos', [])) for pedido in pedidos)
+
+    if total_lineas != len(productos_movidos):
+        raise ValueError(
+            "Inconsistencia interna: número de líneas movidas no coincide con productos del pedido."
+        )
+
+    idx = 0
+    for pedido in pedidos:
+        for producto_data in pedido.get('productos', []):
+            moved = productos_movidos[idx]
+            idx += 1
+
+            producto_pedido = producto_data.get('producto')
+            producto_moved = moved.get('producto')
+            id_pedido = producto_pedido.id if hasattr(producto_pedido, 'id') else producto_pedido
+            id_moved = producto_moved.id if hasattr(producto_moved, 'id') else producto_moved
+
+            if id_pedido != id_moved:
+                raise ValueError(
+                    "Inconsistencia interna: el orden de productos movidos no coincide con el pedido."
+                )
+
+            lotes_reales = moved.get('lotes', [])
+            if not lotes_reales:
+                raise ValueError(
+                    f"No se pudieron mover lotes para el producto {getattr(producto_pedido, 'nombre', id_pedido)}."
+                )
+
+            cantidad_solicitada = _dqty(producto_data.get('cantidad'))
+            cantidad_movida = _dqty(sum(_dqty(lote.get('cantidad')) for lote in lotes_reales))
+            if cantidad_movida + QTY_3 < cantidad_solicitada:
+                raise ValueError(
+                    f"No se pudo mover la cantidad completa del producto "
+                    f"{getattr(producto_pedido, 'nombre', id_pedido)}. "
+                    f"Solicitado: {cantidad_solicitada}, movido: {cantidad_movida}."
+                )
+
+            # Guardamos los lotes reales (ya en almacén destino) y normalizamos cantidad.
+            producto_data['lotes'] = lotes_reales
+            producto_data['cantidad'] = cantidad_solicitada
+
+    return pedidos
 
 
 def obtener_productos_sin_venta(pedidos=[]):
