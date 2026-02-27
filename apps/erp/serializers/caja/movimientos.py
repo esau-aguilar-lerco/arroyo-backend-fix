@@ -243,7 +243,7 @@ class MovimientoCajaVentaSerializer(serializers.Serializer):
                 metodo_pago = pago_data['metodo_pago']
                 monto_bruto = Decimal(str(pago_data['monto']))
                 monto_pagado = monto_bruto
-                referencia = pago_data.get('referencia', '').strip()
+                referencia = (pago_data.get('referencia') or '').strip()
                 if metodo_pago.nombre.upper() == 'EFECTIVO' and cambio_restante > 0:
                     cambio_aplicado = min(cambio_restante, monto_pagado)
                     monto_pagado = monto_pagado - cambio_aplicado

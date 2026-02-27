@@ -220,6 +220,20 @@ class VentaSerializer(BaseSerializer):
     """
     Serializer completo para ventas con detalles y control de lotes
     """
+    fase = serializers.ChoiceField(
+        choices=[
+            (Venta.FASE_PRE_VENTA, Venta.FASE_PRE_VENTA),
+            (Venta.FASE_VENTA_COMANDA, Venta.FASE_VENTA_COMANDA),
+            (Venta.FASE_EN_PROCESO, Venta.FASE_EN_PROCESO),
+            (Venta.FASE_TERMINADA, Venta.FASE_TERMINADA),
+            (Venta.FASE_CANCELADA, Venta.FASE_CANCELADA),
+            # Compatibilidad con app móvil legacy
+            ('VENTA APP', 'VENTA APP'),
+        ],
+        required=False,
+        help_text="Fase de la venta. Alias soportado: 'VENTA APP' -> 'TERMINADA'."
+    )
+
     vendedor = SerializerRelatedField(
         queryset=Usuario.objects.filter(
             is_active=True
@@ -326,6 +340,11 @@ class VentaSerializer(BaseSerializer):
         """
         Validaciones de la venta
         """
+        # Compatibilidad con payloads de app móvil
+        fase_raw = data.get('fase')
+        if isinstance(fase_raw, str) and fase_raw.strip().upper() in {'VENTA APP', 'VENTA_APP'}:
+            data['fase'] = Venta.FASE_TERMINADA
+
         fase = data.get('fase')
         ruta = data.get('ruta')
         almacen = data.get('almacen')
