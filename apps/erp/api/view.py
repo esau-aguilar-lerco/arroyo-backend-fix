@@ -327,6 +327,7 @@ class ProductoMiniViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
         almacen_id = self.request.query_params.get('almacen_id', None)
         is_compras = self.request.query_params.get('is_compras', False)
         completo = self.request.query_params.get('completo', False)
+        inventory_source = self.request.query_params.get('source', 'auto')
         # Agregar al contexto si existen
         if cliente_id:
             context['cliente_id'] = int(cliente_id)
@@ -342,6 +343,8 @@ class ProductoMiniViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
                 context['almacen_id'] = user_almacen.id
             else:
                 context['almacen_id'] = 1
+
+        context['inventory_source'] = str(inventory_source or 'auto').lower()
 
         if is_compras:
             context['is_compras'] = is_compras.lower() in ['true', '1', 'yes']
@@ -367,6 +370,13 @@ class ProductoMiniViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
                 type=OpenApiTypes.INT,
                 location=OpenApiParameter.QUERY,
                 description='ID del almacén para obtener inventario específico',
+                required=False
+            ),
+            OpenApiParameter(
+                name='source',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                description='Origen de inventario: auto|reparto|lotes. auto usa reparto para usuarios de ruta con embarque activo.',
                 required=False
             ),
             OpenApiParameter(

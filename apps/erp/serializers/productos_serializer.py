@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from decimal import Decimal
+from django.db import models
 
 #MODELS
 from apps.base.models import BaseModel
@@ -211,6 +212,9 @@ class   ProductoMiniSerializer(BaseSerializer):
 
         if almacen_id:
             try:
+                inventario_reparto = self._get_inventario_operativo_reparto(int(almacen_id))
+                if inventario_reparto is not None:
+                    return float(inventario_reparto.get(obj.id, Decimal('0.000')))
                 inventario = obj.get_mi_stock_almacen(int(almacen_id))
                 return float(inventario) if inventario else 0.0
             except Exception as e:
@@ -220,6 +224,102 @@ class   ProductoMiniSerializer(BaseSerializer):
         #print(f"ℹ️ Sin almacen_id, usando inventario total")
         
         return 0.0
+
+    def _to_decimal_or_zero(self, value):
+        if value is None:
+            return Decimal('0.000')
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return Decimal('0.000')
+
+    def _get_inventario_operativo_reparto(self, almacen_id):
+        """
+        Devuelve inventario operativo por reparto activo (REPARTO > PROGRAMADO/CARGA).
+        Si no aplica, retorna None para usar inventario físico por lotes.
+        """
+        context = self.context or {}
+        if context.get('_inv_reparto_cache_ready') and context.get('_inv_reparto_cache_almacen') == almacen_id:
+            return context.get('_inv_reparto_cache')
+
+        context['_inv_reparto_cache_ready'] = True
+        context['_inv_reparto_cache_almacen'] = almacen_id
+        context['_inv_reparto_cache'] = None
+
+        request = context.get('request')
+        if not request or not getattr(request, 'user', None):
+            return None
+
+        inventory_source = str(context.get('inventory_source', 'auto') or 'auto').lower()
+        if inventory_source == 'lotes':
+            return None
+
+        user_almacen = getattr(request.user, 'almacen', None)
+        is_user_route = bool(user_almacen and getattr(user_almacen, 'tipo', None) == 'RUTA')
+        if inventory_source == 'auto' and not is_user_route:
+            return None
+
+        from apps.base.models import BaseModel
+        from apps.inventario.models import EmbarqueReparto, ProductoEmbarque
+
+        fases_programado = EmbarqueReparto.fases_programado_compat()
+        prioridad_fase = models.Case(
+            models.When(fase=EmbarqueReparto.FASE_REPARTO, then=models.Value(0)),
+            models.When(fase__in=fases_programado, then=models.Value(1)),
+            default=models.Value(9),
+            output_field=models.IntegerField(),
+        )
+
+        embarque = (
+            EmbarqueReparto.objects
+            .filter(status_model=BaseModel.STATUS_MODEL_ACTIVE)
+            .filter(
+                models.Q(fase=EmbarqueReparto.FASE_REPARTO) |
+                models.Q(fase__in=fases_programado)
+            )
+            .filter(
+                models.Q(ruta__almacen_id=almacen_id) |
+                models.Q(ruta__almacen_embarque_id=almacen_id)
+            )
+            .prefetch_related(
+                models.Prefetch(
+                    'productos',
+                    queryset=ProductoEmbarque.objects.select_related('preventa').prefetch_related('preventa__detalles')
+                )
+            )
+            .annotate(_prioridad_fase=prioridad_fase)
+            .order_by('_prioridad_fase', '-id')
+            .first()
+        )
+
+        if not embarque:
+            return None
+
+        inventario_map = {}
+        for prod_emb in embarque.productos.all():
+            if not prod_emb.producto_id:
+                continue
+
+            cantidad = self._to_decimal_or_zero(prod_emb.cantidad)
+            if prod_emb.tipo == ProductoEmbarque.PEDIDO and prod_emb.preventa_id:
+                preventa = getattr(prod_emb, 'preventa', None)
+                if preventa is not None and hasattr(preventa, 'detalles'):
+                    detalle = next(
+                        (d for d in preventa.detalles.all() if d.producto_id == prod_emb.producto_id),
+                        None
+                    )
+                    if detalle is not None:
+                        cantidad -= self._to_decimal_or_zero(getattr(detalle, 'cantidad_entregada', None))
+
+            if cantidad <= 0:
+                continue
+
+            inventario_map[prod_emb.producto_id] = (
+                inventario_map.get(prod_emb.producto_id, Decimal('0.000')) + cantidad
+            )
+
+        context['_inv_reparto_cache'] = inventario_map
+        return inventario_map
 class ProductoInfoSerializer(serializers.Serializer):
     """Serializer para la información del producto"""
     id = serializers.IntegerField()
