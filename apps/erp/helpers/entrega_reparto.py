@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from django.db import models
 from django.db.models import Sum
 
 from apps.base.models import BaseModel
@@ -46,11 +47,7 @@ def registrar_entrega_productos(venta: Venta, productos_entregados: list, usuari
     if not almacen_pedido:
         raise ValueError("La ruta no tiene almacén de pedidos (embarque) configurado.")
 
-    embarque = (
-        EmbarqueReparto.objects.filter(ventas=venta)
-        .order_by('-created_at')
-        .first()
-    )
+    embarque = _resolver_embarque_para_venta(venta)
     if not embarque:
         raise ValueError(f"No se encontró un embarque relacionado para la venta {venta.codigo}.")
 
@@ -72,7 +69,7 @@ def registrar_entrega_productos(venta: Venta, productos_entregados: list, usuari
         detalle = detalles_venta.get(producto.id)
         if not detalle:
             raise ValueError(f"El producto {producto.nombre} no pertenece a la venta {venta.codigo}.")
-        producto_embarque = (
+        producto_embarques = list(
             embarque.productos
             .filter(
                 preventa=venta,
@@ -80,9 +77,25 @@ def registrar_entrega_productos(venta: Venta, productos_entregados: list, usuari
                 tipo=ProductoEmbarque.PEDIDO,
                 status_model=BaseModel.STATUS_MODEL_ACTIVE,
             )
-            .order_by('-id')
-            .first()
+            .order_by('id')
         )
+        if not producto_embarques:
+            # Fallback defensivo: buscar líneas activas en cualquier embarque activo
+            # de la venta por si el vínculo de "latest" no corresponde al reparto actual.
+            producto_embarques = list(
+                ProductoEmbarque.objects
+                .filter(
+                    embarque__ventas=venta,
+                    embarque__status_model=BaseModel.STATUS_MODEL_ACTIVE,
+                    embarque__fase__in=[EmbarqueReparto.FASE_REPARTO] + EmbarqueReparto.fases_programado_compat(),
+                    preventa=venta,
+                    producto=producto,
+                    tipo=ProductoEmbarque.PEDIDO,
+                    status_model=BaseModel.STATUS_MODEL_ACTIVE,
+                )
+                .select_related('embarque')
+                .order_by('-embarque_id', 'id')
+            )
 
         # En este flujo la app envía la cantidad entregada acumulada por producto.
         # Para evitar salidas duplicadas, sólo se mueve el delta pendiente.
@@ -114,9 +127,9 @@ def registrar_entrega_productos(venta: Venta, productos_entregados: list, usuari
 
         # salida por entrega al cliente
         if cantidad_entrega_delta > 0:
-            if producto_embarque:
+            if producto_embarques:
                 lotes_entrega = _buscar_lotes_asignados_embarque(
-                    producto_embarque=producto_embarque,
+                    producto_embarques=producto_embarques,
                     venta=venta,
                     cantidad_pendiente=cantidad_entrega_delta,
                 )
@@ -164,9 +177,14 @@ def registrar_entrega_productos(venta: Venta, productos_entregados: list, usuari
             ((cantidad_entregada + cantidad_devolucion) >= detalle.cantidad)
         )
         detalle.save(update_fields=['cantidad_entregada', 'is_entregado'])
-        if producto_embarque:
-            producto_embarque.cantidad_entregada = cantidad_entregada
-            producto_embarque.save(update_fields=['cantidad_entregada', 'updated_at'])
+        if producto_embarques:
+            restante_entregado = cantidad_entregada
+            for producto_embarque in producto_embarques:
+                cantidad_linea = _to_decimal(producto_embarque.cantidad)
+                entregado_linea = min(cantidad_linea, max(restante_entregado, Decimal('0')))
+                producto_embarque.cantidad_entregada = entregado_linea
+                producto_embarque.save(update_fields=['cantidad_entregada', 'updated_at'])
+                restante_entregado -= entregado_linea
 
         if cantidad_devolucion > 0 or observacion_item:
             incidencia_lineas.append(
@@ -250,21 +268,38 @@ def _buscar_lotes(producto, almacen, cantidad_pendiente):
     return lotes_a_usar
 
 
-def _buscar_lotes_asignados_embarque(producto_embarque, venta, cantidad_pendiente):
+def _buscar_lotes_asignados_embarque(producto_embarques, venta, cantidad_pendiente):
     """
     Entrega sólo desde lotes asignados a ese producto en el embarque/venta.
     Evita que una venta consuma lotes asignados a otra.
     """
     cantidad_restante = _to_decimal(cantidad_pendiente)
-    lotes_asignados_qs = producto_embarque.lotes.select_related('lote').order_by('id')
-    lotes_asignados_ids = list(lotes_asignados_qs.values_list('lote_id', flat=True))
+    producto_embarques = list(producto_embarques or [])
+    if not producto_embarques:
+        raise ValueError("No se encontraron líneas de embarque para aplicar la entrega.")
+
+    producto = producto_embarques[0].producto
+    lotes_asignados = {}
+    for producto_embarque in producto_embarques:
+        for lp in producto_embarque.lotes.all():
+            lotes_asignados[lp.lote_id] = lotes_asignados.get(lp.lote_id, Decimal('0')) + _to_decimal(lp.cantidad)
+
+    lotes_asignados_ids = list(lotes_asignados.keys())
 
     if not lotes_asignados_ids:
         return _buscar_lotes(
-            producto=producto_embarque.producto,
+            producto=producto,
             almacen=venta.ruta.almacen_embarque,
             cantidad_pendiente=cantidad_restante,
         )
+
+    lotes_map = {
+        lote.id: lote
+        for lote in LoteInventario.objects.filter(
+            id__in=lotes_asignados_ids,
+            status_model=BaseModel.STATUS_MODEL_ACTIVE,
+        )
+    }
 
     entregado_por_lote = {
         row['lote_id']: _to_decimal(row['total'] or 0)
@@ -275,7 +310,7 @@ def _buscar_lotes_asignados_embarque(producto_embarque, venta, cantidad_pendient
                 movimiento__movimiento=MovimientoInventario.SALIDA_VENTA,
                 movimiento__status_model=BaseModel.STATUS_MODEL_ACTIVE,
                 status_model=BaseModel.STATUS_MODEL_ACTIVE,
-                producto_id=producto_embarque.producto_id,
+                producto_id=producto.id,
                 lote_id__in=lotes_asignados_ids,
             )
             .values('lote_id')
@@ -284,31 +319,75 @@ def _buscar_lotes_asignados_embarque(producto_embarque, venta, cantidad_pendient
     }
 
     lotes_a_usar = []
-    for lote_asignado in lotes_asignados_qs:
+    for lote_id in sorted(lotes_asignados_ids):
         if cantidad_restante <= 0:
             break
 
-        cantidad_asignada = _to_decimal(lote_asignado.cantidad)
-        cantidad_ya_entregada_lote = entregado_por_lote.get(lote_asignado.lote_id, Decimal('0'))
+        lote = lotes_map.get(lote_id)
+        if not lote:
+            continue
+
+        cantidad_asignada = _to_decimal(lotes_asignados.get(lote_id, 0))
+        cantidad_ya_entregada_lote = entregado_por_lote.get(lote_id, Decimal('0'))
         cupo_lote = cantidad_asignada - cantidad_ya_entregada_lote
         if cupo_lote <= 0:
             continue
 
-        disponible_real_lote = _to_decimal(lote_asignado.lote.cantidad)
+        disponible_real_lote = _to_decimal(lote.cantidad)
         cantidad_usar = min(cantidad_restante, cupo_lote, disponible_real_lote)
         if cantidad_usar <= 0:
             continue
 
-        lotes_a_usar.append({'lote': lote_asignado.lote, 'cantidad': cantidad_usar})
+        lotes_a_usar.append({'lote': lote, 'cantidad': cantidad_usar})
         cantidad_restante -= cantidad_usar
 
     if cantidad_restante > 0:
         raise ValueError(
-            f"No hay suficiente stock del producto {producto_embarque.producto.nombre}. "
+            f"No hay suficiente stock del producto {producto.nombre}. "
             f"Faltan {float(cantidad_restante)} unidades."
         )
 
     return lotes_a_usar
+
+
+def _resolver_embarque_para_venta(venta):
+    """
+    Prioriza embarque activo en REPARTO de la venta; si no existe, usa PROGRAMADO.
+    Como fallback final usa el último embarque asociado.
+    """
+    fases_programado = EmbarqueReparto.fases_programado_compat()
+    prioridad_fase = models.Case(
+        models.When(fase=EmbarqueReparto.FASE_REPARTO, then=models.Value(0)),
+        models.When(fase__in=fases_programado, then=models.Value(1)),
+        default=models.Value(9),
+        output_field=models.IntegerField(),
+    )
+
+    embarque_activo = (
+        EmbarqueReparto.objects
+        .filter(
+            ventas=venta,
+            status_model=BaseModel.STATUS_MODEL_ACTIVE,
+        )
+        .filter(
+            models.Q(fase=EmbarqueReparto.FASE_REPARTO) |
+            models.Q(fase__in=fases_programado)
+        )
+        .prefetch_related('productos__lotes')
+        .annotate(_prioridad_fase=prioridad_fase)
+        .order_by('_prioridad_fase', '-id')
+        .first()
+    )
+    if embarque_activo:
+        return embarque_activo
+
+    return (
+        EmbarqueReparto.objects
+        .filter(ventas=venta, status_model=BaseModel.STATUS_MODEL_ACTIVE)
+        .prefetch_related('productos__lotes')
+        .order_by('-created_at', '-id')
+        .first()
+    )
 
 
 def _crear_movimiento(lotes, almacen, user, venta):
