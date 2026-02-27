@@ -1509,6 +1509,13 @@ def obtener_caja_movimientos_embarque(request):
             location=OpenApiParameter.QUERY,
             description='Fase opcional cuando no se envía embarque_id. Valores: PROGRAMADO o REPARTO. Si no se envía, prioriza REPARTO activo y, si no existe, PROGRAMADO.',
             required=False
+        ),
+        OpenApiParameter(
+            name='include_terminadas',
+            type=OpenApiTypes.BOOL,
+            location=OpenApiParameter.QUERY,
+            description='Incluye ventas ya entregadas/terminadas en el listado de pedidos (default: false).',
+            required=False
         )
     ],
     responses={
@@ -1536,6 +1543,7 @@ def listado_pedidos_usuario_reparto(request):
     try:
         embarque_id = request.query_params.get('embarque_id')
         fase_raw = (request.query_params.get('fase') or '').strip().upper()
+        include_terminadas = (request.query_params.get('include_terminadas') or '').lower() == 'true'
         fase_param = None
         if fase_raw:
             fase_param = (
@@ -1660,6 +1668,8 @@ def listado_pedidos_usuario_reparto(request):
 
         ventas_data = []
         for venta in embarque.ventas.all().order_by('-created_at'):
+            if not include_terminadas and (venta.is_entregado or venta.ya_terminada or venta.fase == Venta.FASE_TERMINADA):
+                continue
             detalles_venta_map = {d.producto_id: d for d in venta.detalles.all()}
             detalles_data = []
             productos_cargados = productos_por_venta.get(venta.id, [])
@@ -1801,6 +1811,20 @@ def listado_pedidos_usuario_reparto(request):
             required=False
         ),
         OpenApiParameter(
+            name='embarque_id',
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.QUERY,
+            description='Filtrar historial por un embarque específico terminado.',
+            required=False
+        ),
+        OpenApiParameter(
+            name='scope',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description="Alcance del historial: 'ultimo_reparto' (default) o 'todos'.",
+            required=False
+        ),
+        OpenApiParameter(
             name='fecha_inicio',
             type=OpenApiTypes.DATE,
             location=OpenApiParameter.QUERY,
@@ -1814,27 +1838,6 @@ def listado_pedidos_usuario_reparto(request):
             description='Fecha final (YYYY-MM-DD) sobre fecha de actualización de la venta',
             required=False
         ),
-        OpenApiParameter(
-            name='limit',
-            type=OpenApiTypes.INT,
-            location=OpenApiParameter.QUERY,
-            description='Límite para paginación',
-            required=False
-        ),
-        OpenApiParameter(
-            name='offset',
-            type=OpenApiTypes.INT,
-            location=OpenApiParameter.QUERY,
-            description='Offset para paginación',
-            required=False
-        ),
-        OpenApiParameter(
-            name='sin_paginacion',
-            type=OpenApiTypes.BOOL,
-            location=OpenApiParameter.QUERY,
-            description='Si es true, devuelve todos los registros',
-            required=False
-        ),
     ],
     responses={200: OpenApiTypes.OBJECT},
     tags=['Embarque']
@@ -1844,18 +1847,19 @@ def historial_ventas_usuario_reparto(request):
     from datetime import datetime
     from decimal import Decimal
     from django.db.models import Q, Prefetch
-    from rest_framework.pagination import LimitOffsetPagination
 
     user = request.user
     is_admin = bool(getattr(user, 'is_superuser', False) or getattr(user, 'is_staff', False))
 
     search = (request.query_params.get('search') or '').strip()
     ruta_id_raw = (request.query_params.get('ruta_id') or '').strip()
+    embarque_id_raw = (request.query_params.get('embarque_id') or '').strip()
+    scope = (request.query_params.get('scope') or 'ultimo_reparto').strip().lower()
     fecha_inicio_raw = (request.query_params.get('fecha_inicio') or '').strip()
     fecha_fin_raw = (request.query_params.get('fecha_fin') or '').strip()
-    sin_paginacion = (request.query_params.get('sin_paginacion') or '').lower() == 'true'
 
     ruta_id = None
+    embarque_id = None
     if ruta_id_raw:
         if not ruta_id_raw.isdigit():
             return Response(
@@ -1863,6 +1867,19 @@ def historial_ventas_usuario_reparto(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         ruta_id = int(ruta_id_raw)
+    if embarque_id_raw:
+        if not embarque_id_raw.isdigit():
+            return Response(
+                {'detail': "El parámetro 'embarque_id' debe ser numérico."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        embarque_id = int(embarque_id_raw)
+
+    if scope not in {'ultimo_reparto', 'todos'}:
+        return Response(
+            {'detail': "El parámetro 'scope' solo acepta 'ultimo_reparto' o 'todos'."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
     fecha_inicio = None
     fecha_fin = None
@@ -1892,6 +1909,17 @@ def historial_ventas_usuario_reparto(request):
     if ruta_id:
         embarques_prefetch = embarques_prefetch.filter(ruta_id=ruta_id)
 
+    embarque_contexto = None
+    if embarque_id:
+        embarque_contexto = embarques_prefetch.filter(
+            id=embarque_id,
+            fase=EmbarqueReparto.FASE_TERMINADO
+        ).first()
+    elif scope == 'ultimo_reparto':
+        embarque_contexto = embarques_prefetch.filter(
+            fase=EmbarqueReparto.FASE_TERMINADO
+        ).order_by('-fecha_finalizada', '-id').first()
+
     ventas_qs = Venta.objects.select_related(
         'cliente',
         'ruta'
@@ -1913,6 +1941,14 @@ def historial_ventas_usuario_reparto(request):
     ).filter(
         Q(is_entregado=True) | Q(ya_terminada=True) | Q(fase=Venta.FASE_TERMINADA)
     ).distinct().order_by('-updated_at', '-id')
+
+    if embarque_contexto:
+        ventas_qs = ventas_qs.filter(embarques_ruta__id=embarque_contexto.id)
+    elif embarque_id:
+        return Response(
+            {'detail': 'No se encontró un embarque terminado con ese ID para el usuario actual.'},
+            status=status.HTTP_404_NOT_FOUND
+        )
 
     if not is_admin:
         ventas_qs = ventas_qs.filter(
@@ -1998,30 +2034,20 @@ def historial_ventas_usuario_reparto(request):
             'detalles': detalles,
         }
 
-    if sin_paginacion:
-        results = [_serialize_venta(item) for item in ventas_qs]
-        return Response(
-            {
-                'count': len(results),
-                'next': None,
-                'previous': None,
-                'results': results,
-            },
-            status=status.HTTP_200_OK
-        )
-
-    paginator = LimitOffsetPagination()
-    page = paginator.paginate_queryset(ventas_qs, request)
-    if page is not None:
-        results = [_serialize_venta(item) for item in page]
-        return paginator.get_paginated_response(results)
-
     results = [_serialize_venta(item) for item in ventas_qs]
     return Response(
         {
+            'scope': scope,
+            'embarque_contexto': {
+                'id': embarque_contexto.id,
+                'fase': embarque_contexto.fase,
+                'ruta_id': embarque_contexto.ruta_id,
+                'ruta_codigo': embarque_contexto.ruta.codigo if embarque_contexto.ruta else None,
+                'ruta_nombre': embarque_contexto.ruta.nombre if embarque_contexto.ruta else None,
+                'fecha_salida': embarque_contexto.fecha_salida,
+                'fecha_finalizada': embarque_contexto.fecha_finalizada,
+            } if embarque_contexto else None,
             'count': len(results),
-            'next': None,
-            'previous': None,
             'results': results,
         },
         status=status.HTTP_200_OK
