@@ -445,6 +445,26 @@ Ejemplo:
 curl -sS "$BASE/embarques-reparto/historial-ventas/?limit=20&offset=0" -H "$H_R"
 ```
 
+## Paso 1.2. Cierre de reparto (JSON/PDF)
+
+### `GET /api/embarques-reparto/caja-movimientos/?embarque_id={id}`
+
+Devuelve el corte completo del reparto con:
+- `ventas_corte`
+- `abonos_detalle`
+- `abonos_resumen_credito`
+- `formas_pago`
+- `corte_reparto`
+
+Para impresión desde backend:
+
+### `GET /api/embarques-reparto/caja-movimientos/?embarque_id={id}&formato=pdf`
+
+Respuesta: archivo PDF (`application/pdf`) listo para descargar/imprimir.
+
+Parámetro opcional:
+- `disposition=inline` para abrirlo en navegador (por defecto usa `attachment` para descarga).
+
 ## Paso 2. Listar pedidos programados (pantalla de carga)
 
 - Llamar `GET /api/embarques/preventas-detalles/?fase=PROGRAMADO`.

@@ -2,10 +2,14 @@ from rest_framework import status, permissions, serializers
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
+from django.http import HttpResponse
 from django.db import transaction
 from django.db.models import Sum, Q, Count
 from django.core.exceptions import ValidationError
 from collections import defaultdict
+from decimal import Decimal, InvalidOperation
+from io import BytesIO
+from datetime import datetime
 
 from drf_spectacular.utils import extend_schema, inline_serializer, OpenApiParameter, OpenApiExample
 from drf_spectacular.types import OpenApiTypes
@@ -135,6 +139,209 @@ def _safe_fallar_operacion(operacion_id, error_message, http_status, user):
         )
     except Exception as fallar_error:
         print(f"⚠️ [IDEMPOTENCIA] No se pudo registrar fallo de operación: {fallar_error}")
+
+
+def _to_decimal(value):
+    if value is None:
+        return Decimal("0")
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal("0")
+
+
+def _fmt_money(value):
+    amount = _to_decimal(value)
+    return f"${amount:,.2f}"
+
+
+def _fmt_datetime(value):
+    if value is None:
+        return "-"
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M")
+    return str(value)
+
+
+def _build_corte_reparto_lines(response_data):
+    corte = response_data.get('corte_reparto') or {}
+    encabezado = corte.get('encabezado') or {}
+    ventas_corte = corte.get('ventas_corte') or []
+    creditos_abonos = corte.get('creditos_abonos') or []
+    formas_pago = corte.get('formas_pago') or []
+    totales = corte.get('totales') or {}
+    abonos_detalle = response_data.get('abonos_detalle') or []
+    firmas = corte.get('firmas') or {}
+
+    lines = []
+    lines.append("CORTE DE REPARTO")
+    lines.append("=" * 130)
+    lines.append(
+        f"Reparto: #{encabezado.get('reparto_id', '-')}"
+        f"   Ruta: {encabezado.get('ruta_codigo', '-') or '-'} - {encabezado.get('ruta_nombre', '-') or '-'}"
+    )
+    lines.append(
+        f"Unidad: {encabezado.get('unidad_codigo', '-') or '-'} - {encabezado.get('unidad_nombre', '-') or '-'}"
+        f"   Placas: {encabezado.get('unidad_placas', '-') or '-'}"
+    )
+    lines.append(
+        f"Encargado ruta: {encabezado.get('encargado_nombre', '-') or '-'}"
+        f"   Cajero cierre: {encabezado.get('empleado_caja_nombre', '-') or '-'}"
+    )
+    lines.append(
+        f"Fecha salida: {_fmt_datetime(encabezado.get('fecha_reparto'))}"
+        f"   Fecha cierre: {_fmt_datetime(encabezado.get('fecha_cierre'))}"
+    )
+    lines.append("")
+
+    lines.append("VENTAS")
+    lines.append("-" * 130)
+    lines.append(f"{'VENTA #ID':<18} {'CLIENTE':<42} {'TOTAL':>12} {'PAGO':>12} {'CREDITO':>8} {'SALDO':>12}")
+    lines.append("-" * 130)
+    if ventas_corte:
+        for row in ventas_corte:
+            venta_id = row.get('venta_id')
+            codigo = row.get('venta_codigo') or '-'
+            cliente = row.get('cliente_nombre') or '-'
+            total = _fmt_money(row.get('total'))
+            pago = _fmt_money(row.get('pago'))
+            credito = row.get('credito') or 'NO'
+            saldo = _fmt_money(row.get('saldo'))
+            lines.append(
+                f"#{venta_id} {codigo}"[:18].ljust(18)
+                + f" {cliente[:42]:<42} {total:>12} {pago:>12} {credito:>8} {saldo:>12}"
+            )
+    else:
+        lines.append("Sin ventas registradas para este corte.")
+    lines.append("")
+
+    lines.append("CREDITOS / ABONOS")
+    lines.append("-" * 130)
+    lines.append(
+        f"{'CREDITO #ID':<12} {'CLIENTE':<28} {'TRANSFER':>12} {'CHEQUE':>10} {'DEPOSITO':>10} {'OTROS':>10} {'ABONO':>12} {'SALDO':>12}"
+    )
+    lines.append("-" * 130)
+    if creditos_abonos:
+        for row in creditos_abonos:
+            credito_id = row.get('credito_id') or '-'
+            cliente = row.get('cliente_nombre') or '-'
+            transferencia = _fmt_money(row.get('transferencia'))
+            cheque = _fmt_money(row.get('cheque'))
+            deposito = _fmt_money(row.get('deposito'))
+            otros = _fmt_money(row.get('otros'))
+            abono = _fmt_money(row.get('abono_total'))
+            saldo = _fmt_money(row.get('saldo'))
+            lines.append(
+                f"#{credito_id}"[:12].ljust(12)
+                + f" {cliente[:28]:<28} {transferencia:>12} {cheque:>10} {deposito:>10} {otros:>10} {abono:>12} {saldo:>12}"
+            )
+    else:
+        lines.append("Sin abonos a credito registrados.")
+    lines.append("")
+
+    lines.append("DETALLE DE MOVIMIENTOS DE ABONO")
+    lines.append("-" * 130)
+    lines.append(f"{'FECHA':<18} {'CLIENTE':<28} {'CREDITO':<10} {'METODO':<18} {'MONTO':>12} {'REFERENCIA':<16} {'USUARIO':<24}")
+    lines.append("-" * 130)
+    if abonos_detalle:
+        for row in abonos_detalle:
+            fecha = _fmt_datetime(row.get('created_at'))
+            cliente = row.get('cliente_nombre') or '-'
+            credito = f"#{row.get('credito_id')}" if row.get('credito_id') else '-'
+            metodo = row.get('metodo_pago_nombre') or '-'
+            monto = _fmt_money(row.get('monto'))
+            referencia = (row.get('referencia') or '-')[:16]
+            usuario = (row.get('created_by_nombre') or '-')[:24]
+            lines.append(
+                f"{fecha[:18]:<18} {cliente[:28]:<28} {credito:<10} {metodo[:18]:<18} {monto:>12} {referencia:<16} {usuario:<24}"
+            )
+    else:
+        lines.append("Sin detalle de abonos para este corte.")
+    lines.append("")
+
+    lines.append("FORMAS DE PAGO (VENTAS + ABONOS)")
+    lines.append("-" * 130)
+    lines.append(f"{'METODO':<30} {'VENTAS':>14} {'ABONOS':>14} {'TOTAL':>14}")
+    lines.append("-" * 130)
+    if formas_pago:
+        for row in formas_pago:
+            metodo = row.get('metodo_pago_nombre') or '-'
+            ventas_total = _fmt_money(row.get('ventas'))
+            abonos_total = _fmt_money(row.get('abonos'))
+            total = _fmt_money(row.get('total'))
+            lines.append(f"{metodo[:30]:<30} {ventas_total:>14} {abonos_total:>14} {total:>14}")
+    else:
+        lines.append("Sin movimientos por metodo de pago.")
+    lines.append("")
+
+    lines.append("TOTALES")
+    lines.append("-" * 130)
+    lines.append(f"Total ventas:          {_fmt_money(totales.get('total_ventas'))}")
+    lines.append(f"Total cobrado ventas:  {_fmt_money(totales.get('total_cobrado_ventas'))}")
+    lines.append(f"Total abonos:          {_fmt_money(totales.get('total_abonos'))}")
+    lines.append(f"Total abonos efectivo: {_fmt_money(totales.get('total_abonos_efectivo'))}")
+    lines.append(f"Total general:         {_fmt_money(totales.get('total_general'))}")
+    lines.append("")
+    lines.append("FIRMAS")
+    lines.append("-" * 130)
+    lines.append(f"Gerente ruta: {firmas.get('gerente_ruta') or '________________________'}")
+    lines.append(f"Cajero cierre: {firmas.get('cajero_cierre') or '________________________'}")
+    lines.append("")
+    lines.append(f"Generado: {_fmt_datetime(datetime.now())}")
+    return lines
+
+
+def _render_corte_pdf(response_data):
+    from PIL import Image, ImageDraw, ImageFont
+
+    lines = _build_corte_reparto_lines(response_data)
+    page_width, page_height = 1654, 2339
+    margin_x, margin_y = 60, 70
+
+    font_path_candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+    ]
+    font = None
+    for path in font_path_candidates:
+        try:
+            font = ImageFont.truetype(path, 22)
+            break
+        except Exception:
+            continue
+    if font is None:
+        font = ImageFont.load_default()
+
+    # line spacing robusta entre diferentes fuentes
+    ascent, descent = font.getmetrics() if hasattr(font, "getmetrics") else (14, 4)
+    line_height = max(ascent + descent + 8, 24)
+    max_lines_per_page = max((page_height - (margin_y * 2)) // line_height, 1)
+
+    pages = []
+    current_index = 0
+    total_lines = len(lines)
+    while current_index < total_lines:
+        page = Image.new("RGB", (page_width, page_height), "white")
+        draw = ImageDraw.Draw(page)
+        y = margin_y
+        end_index = min(current_index + max_lines_per_page, total_lines)
+        for idx in range(current_index, end_index):
+            draw.text((margin_x, y), lines[idx], fill="black", font=font)
+            y += line_height
+        pages.append(page)
+        current_index = end_index
+
+    buffer = BytesIO()
+    pages[0].save(
+        buffer,
+        format="PDF",
+        save_all=True,
+        append_images=pages[1:],
+        resolution=150.0,
+    )
+    return buffer.getvalue()
 
 class EmbarqueListCreateAPIView(APIView):
     """
@@ -1341,7 +1548,7 @@ def checkin_producto_embarque(request):
 
 @extend_schema(
     summary="Obtener movimientos de caja del embarque",
-    description="Obtiene los movimientos de caja (transacciones) asociados a la apertura de caja de un embarque/reparto.",
+    description="Obtiene los movimientos de caja (transacciones) asociados a la apertura de caja de un embarque/reparto. Puede devolver JSON o PDF para impresión de cierre.",
     parameters=[
         OpenApiParameter(
             name='embarque_id',
@@ -1350,9 +1557,23 @@ def checkin_producto_embarque(request):
             description='ID del embarque/reparto',
             required=True
         ),
+        OpenApiParameter(
+            name='formato',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description='Formato de respuesta: json (default) o pdf',
+            required=False
+        ),
+        OpenApiParameter(
+            name='disposition',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description='Solo para formato=pdf: attachment (default) o inline',
+            required=False
+        ),
     ],
     responses={
-        200: "EmbarqueCajaMovimientosSerializer con ventas",
+        200: "EmbarqueCajaMovimientosSerializer con ventas (JSON) o PDF de cierre",
         400: "Error: embarque_id requerido",
         404: "Embarque no encontrado o no tiene caja asignada"
     },
@@ -1364,23 +1585,40 @@ def obtener_caja_movimientos_embarque(request):
     Endpoint para obtener los movimientos de caja asociados a un embarque,
     incluyendo las ventas realizadas durante el periodo del embarque.
     """
-    from django.utils import timezone
     from apps.erp.serializers.embarque.embarque_serializer import (
         EmbarqueCajaMovimientosSerializer,
-        VentaEmbarqueCajaSerializer
+        VentaEmbarqueCajaSerializer,
+        _abonos_detalle_desde_qs,
+        _resumen_abonos_por_credito,
     )
     from apps.erp.models import CajaApertura, CajaTransaccion
     
     embarque_id = request.query_params.get('embarque_id')
+    formato = (request.query_params.get('formato') or 'json').strip().lower()
+    disposition = (request.query_params.get('disposition') or 'attachment').strip().lower()
     
     if not embarque_id:
         return Response(
             {'detail': 'El parámetro embarque_id es requerido'},
             status=status.HTTP_400_BAD_REQUEST
         )
+
+    if formato not in ('json', 'pdf'):
+        return Response(
+            {'detail': "El parámetro formato debe ser 'json' o 'pdf'"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    if disposition not in ('attachment', 'inline'):
+        return Response(
+            {'detail': "El parámetro disposition debe ser 'attachment' o 'inline'"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
     
     # Buscar el embarque
     embarque = EmbarqueReparto.objects.select_related(
+        'ruta',
+        'ruta__unidad',
+        'encargado',
         'apertura_caja',
         'apertura_caja__usuario'
     ).filter(id=embarque_id).first()
@@ -1421,6 +1659,27 @@ def obtener_caja_movimientos_embarque(request):
     ).order_by('-created_at')
     
     ventas_serializer = VentaEmbarqueCajaSerializer(ventas_queryset, many=True)
+    ventas_corte = []
+    for venta in ventas_queryset:
+        total = float(venta.total or 0)
+        pagado = float(venta.total_pagado or 0)
+        saldo = round(max(total - pagado, 0.0), 2)
+        condicion_pago_normalizada = (venta.condicion_pago or '').upper().replace('É', 'E')
+        ventas_corte.append({
+            'venta_id': venta.id,
+            'venta_codigo': venta.codigo,
+            'cliente_id': venta.cliente_id,
+            'cliente_codigo': venta.cliente.codigo if venta.cliente else None,
+            'cliente_nombre': venta.cliente.get_full_name if venta.cliente else None,
+            'total': round(total, 2),
+            'pago': round(pagado, 2),
+            'credito': 'SI' if condicion_pago_normalizada == 'CREDITO' else 'NO',
+            'saldo': saldo,
+            'condicion_pago': venta.condicion_pago,
+            'created_at': venta.created_at,
+            'created_by_id': venta.created_by_id,
+            'created_by_nombre': venta.created_by.full_name() if venta.created_by else None,
+        })
     
     # Calcular totales de ventas
     total_ventas = sum(float(v.total) for v in ventas_queryset)
@@ -1454,12 +1713,16 @@ def obtener_caja_movimientos_embarque(request):
     )
     
     response_data['ventas'] = ventas_serializer.data
+    response_data['ventas_corte'] = ventas_corte
     response_data['total_ventas'] = round(total_ventas, 2)
     response_data['total_cobrado_ventas'] = round(total_cobrado_ventas, 2)
     response_data['cantidad_ventas'] = ventas_queryset.count()
     response_data['recibio_abonos'] = total_abonos > 0
     response_data['total_abonos'] = round(total_abonos, 2)
     response_data['total_abonos_efectivo'] = round(total_abonos_efectivo, 2)
+    abonos_detalle = _abonos_detalle_desde_qs(abonos_caja_qs)
+    response_data['abonos_detalle'] = abonos_detalle
+    response_data['abonos_resumen_credito'] = _resumen_abonos_por_credito(abonos_detalle)
     response_data['abonos_por_metodo'] = [
         {
             'metodo_pago_id': row['metodo_pago_id'],
@@ -1488,7 +1751,57 @@ def obtener_caja_movimientos_embarque(request):
     response_data['total_ventas_formas_pago'] = round(sum(item['ventas'] for item in formas_pago), 2)
     response_data['total_abonos_formas_pago'] = round(sum(item['abonos'] for item in formas_pago), 2)
     response_data['total_general_formas_pago'] = round(sum(item['total'] for item in formas_pago), 2)
+    response_data['corte_reparto'] = {
+        'encabezado': {
+            'reparto_id': embarque.id,
+            'ruta_id': embarque.ruta_id,
+            'ruta_codigo': embarque.ruta.codigo if embarque.ruta else None,
+            'ruta_nombre': embarque.ruta.nombre if embarque.ruta else None,
+            'unidad_id': embarque.ruta.unidad_id if embarque.ruta else None,
+            'unidad_codigo': embarque.ruta.unidad.get_clave() if embarque.ruta and embarque.ruta.unidad else None,
+            'unidad_nombre': embarque.ruta.unidad.nombre if embarque.ruta and embarque.ruta.unidad else None,
+            'unidad_placas': embarque.ruta.unidad.placas if embarque.ruta and embarque.ruta.unidad else None,
+            'encargado_id': embarque.encargado_id,
+            'encargado_nombre': embarque.encargado.full_name() if embarque.encargado else None,
+            'fecha_reparto': embarque.fecha_salida or embarque.created_at,
+            'fecha_cierre': embarque.fecha_finalizada,
+            'empleado_caja_id': apertura_caja.usuario_id if apertura_caja else None,
+            'empleado_caja_nombre': apertura_caja.usuario.full_name() if apertura_caja and apertura_caja.usuario else None,
+        },
+        'ventas': response_data['ventas'],
+        'ventas_corte': ventas_corte,
+        'creditos_abonos': response_data['abonos_resumen_credito'],
+        'formas_pago': response_data['formas_pago'],
+        'totales': {
+            'total_ventas': response_data['total_ventas'],
+            'total_cobrado_ventas': response_data['total_cobrado_ventas'],
+            'total_abonos': response_data['total_abonos'],
+            'total_abonos_efectivo': response_data['total_abonos_efectivo'],
+            'total_general': response_data['total_general_formas_pago'],
+        },
+        'firmas': {
+            'gerente_ruta': None,
+            'cajero_cierre': apertura_caja.usuario.full_name() if apertura_caja and apertura_caja.usuario else None,
+        },
+    }
     
+    if formato == 'pdf':
+        try:
+            pdf_bytes = _render_corte_pdf(response_data)
+        except Exception as exc:
+            return Response(
+                {
+                    'detail': f'Error al generar PDF de cierre: {str(exc)}',
+                    'code': 'PDF_GENERATION_ERROR',
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        file_name = f"corte-reparto-{embarque.id}.pdf"
+        pdf_response = HttpResponse(pdf_bytes, content_type='application/pdf')
+        pdf_response['Content-Disposition'] = f'{disposition}; filename="{file_name}"'
+        return pdf_response
+
     return Response(response_data, status=status.HTTP_200_OK)
 
 

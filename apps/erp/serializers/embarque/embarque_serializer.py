@@ -7,9 +7,139 @@ from apps.base.models import BaseModel
 from django.db.models import Sum, Count
 from django.db.models import Q
 from decimal import Decimal, InvalidOperation
+import re
 
 from apps.erp.helpers.embarque import crear_movimiento_inventario_almacen_embarque
 from apps.contabilidad.models import MetodoPago
+
+
+_CREDITO_ID_REGEX = re.compile(r"cr[eé]dito\s*id\s*(\d+)", re.IGNORECASE)
+
+
+def _extraer_credito_id(descripcion):
+    if not descripcion:
+        return None
+    match = _CREDITO_ID_REGEX.search(str(descripcion))
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def _abonos_detalle_desde_qs(abonos_qs):
+    """
+    Devuelve el detalle completo de abonos de caja para cortes de reparto.
+    Incluye quién abonó, método, referencia y contexto del crédito/cliente.
+    """
+    from apps.credito.models import CreditoCliente
+
+    transacciones = list(
+        abonos_qs.select_related('metodo_pago', 'created_by').order_by('-created_at', '-id')
+    )
+    credito_ids = {
+        credito_id
+        for credito_id in (_extraer_credito_id(tx.descripcion) for tx in transacciones)
+        if credito_id is not None
+    }
+
+    creditos_map = {}
+    if credito_ids:
+        creditos_map = {
+            credito.id: credito
+            for credito in CreditoCliente.objects.select_related('cliente').filter(id__in=credito_ids)
+        }
+
+    detalle = []
+    for tx in transacciones:
+        credito_id = _extraer_credito_id(tx.descripcion)
+        credito = creditos_map.get(credito_id)
+        cliente = credito.cliente if credito else None
+
+        detalle.append({
+            'transaccion_id': tx.id,
+            'created_at': tx.created_at,
+            'created_by_id': tx.created_by_id,
+            'created_by_nombre': tx.created_by.full_name() if tx.created_by else '',
+            'tipo': tx.tipo,
+            'monto': tx.monto,
+            'metodo_pago_id': tx.metodo_pago_id,
+            'metodo_pago_nombre': tx.metodo_pago.nombre if tx.metodo_pago else '',
+            'referencia': tx.referencia,
+            'descripcion': tx.descripcion,
+            'credito_id': credito.id if credito else credito_id,
+            'credito_estado': credito.estado if credito else None,
+            'credito_fecha_vencimiento': credito.fecha_vencimiento if credito else None,
+            'credito_monto': credito.monto if credito else None,
+            'credito_monto_pagado': credito.monto_pagado if credito else None,
+            'credito_adeudo': credito.adeudo_actual() if credito else None,
+            'cliente_id': cliente.id if cliente else None,
+            'cliente_codigo': cliente.codigo if cliente else None,
+            'cliente_nombre': cliente.get_full_name if cliente else None,
+        })
+    return detalle
+
+
+def _categoria_metodo_abono(metodo_nombre):
+    nombre = (metodo_nombre or '').upper()
+    if 'TRANSFER' in nombre:
+        return 'transferencia'
+    if 'CHEQUE' in nombre:
+        return 'cheque'
+    if 'DEPOSITO' in nombre or 'DEPÓSITO' in nombre:
+        return 'deposito'
+    return 'otros'
+
+
+def _resumen_abonos_por_credito(abonos_detalle):
+    """
+    Resumen tabular para impresión de corte:
+    crédito, cliente, transferencia, cheque, deposito, otros, abono y saldo.
+    """
+    agrupado = {}
+    for row in abonos_detalle:
+        credito_id = row.get('credito_id')
+        key = credito_id or f"tx-{row.get('transaccion_id')}"
+        bucket = agrupado.setdefault(key, {
+            'credito_id': credito_id,
+            'cliente_id': row.get('cliente_id'),
+            'cliente_codigo': row.get('cliente_codigo'),
+            'cliente_nombre': row.get('cliente_nombre'),
+            'transferencia': Decimal('0.00'),
+            'cheque': Decimal('0.00'),
+            'deposito': Decimal('0.00'),
+            'otros': Decimal('0.00'),
+            'abono_total': Decimal('0.00'),
+            'saldo': row.get('credito_adeudo'),
+            'movimientos': [],
+        })
+
+        monto = Decimal(str(row.get('monto') or 0))
+        categoria = _categoria_metodo_abono(row.get('metodo_pago_nombre'))
+        bucket[categoria] += monto
+        bucket['abono_total'] += monto
+        if row.get('credito_adeudo') is not None:
+            bucket['saldo'] = row.get('credito_adeudo')
+        bucket['movimientos'].append({
+            'transaccion_id': row.get('transaccion_id'),
+            'created_at': row.get('created_at'),
+            'created_by_id': row.get('created_by_id'),
+            'created_by_nombre': row.get('created_by_nombre'),
+            'monto': row.get('monto'),
+            'metodo_pago_id': row.get('metodo_pago_id'),
+            'metodo_pago_nombre': row.get('metodo_pago_nombre'),
+            'referencia': row.get('referencia'),
+            'descripcion': row.get('descripcion'),
+        })
+
+    return sorted(
+        agrupado.values(),
+        key=lambda item: (
+            item.get('cliente_nombre') or '',
+            item.get('credito_id') or 0,
+        ),
+    )
 
 
 ################################################################################################################
@@ -545,6 +675,8 @@ class EmbarqueDetailSerializer(serializers.ModelSerializer):
     total_abonos = serializers.SerializerMethodField()
     total_abonos_efectivo = serializers.SerializerMethodField()
     recibio_abono = serializers.SerializerMethodField()
+    abonos_detalle = serializers.SerializerMethodField()
+    abonos_resumen_credito = serializers.SerializerMethodField()
     abonos_por_metodo = serializers.SerializerMethodField()
     formas_pago = serializers.SerializerMethodField()
     total_ventas_formas_pago = serializers.SerializerMethodField()
@@ -574,6 +706,8 @@ class EmbarqueDetailSerializer(serializers.ModelSerializer):
             'total_abonos',
             'total_abonos_efectivo',
             'recibio_abono',
+            'abonos_detalle',
+            'abonos_resumen_credito',
             'abonos_por_metodo',
             'formas_pago',
             'total_ventas_formas_pago',
@@ -613,7 +747,7 @@ class EmbarqueDetailSerializer(serializers.ModelSerializer):
             ).filter(
                 Q(descripcion__icontains='Pago de crédito ID') |
                 Q(descripcion__icontains='Pago de credito ID')
-            )
+            ).select_related('metodo_pago', 'created_by')
         cache[obj.id] = qs
         return qs
 
@@ -703,6 +837,12 @@ class EmbarqueDetailSerializer(serializers.ModelSerializer):
 
     def get_recibio_abono(self, obj):
         return self._abonos_queryset(obj).exists()
+
+    def get_abonos_detalle(self, obj):
+        return _abonos_detalle_desde_qs(self._abonos_queryset(obj))
+
+    def get_abonos_resumen_credito(self, obj):
+        return _resumen_abonos_por_credito(self.get_abonos_detalle(obj))
 
     def get_abonos_por_metodo(self, obj):
         rows = self._abonos_queryset(obj).values('metodo_pago_id', 'metodo_pago__nombre').annotate(
