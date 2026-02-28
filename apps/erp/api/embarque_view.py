@@ -165,6 +165,28 @@ def _fmt_datetime(value):
     return str(value)
 
 
+def _usuario_reporte(nombre_usuario, ruta_nombre=None):
+    """
+    Normaliza nombres largos tipo 'ENCARGADO DE RUTA XALAPA ..' a 'RUTA XALAPA'
+    para que no se corten en el PDF.
+    """
+    ruta = (ruta_nombre or "").strip()
+    if ruta:
+        return f"RUTA {ruta}"
+
+    nombre = (nombre_usuario or "").strip()
+    if not nombre:
+        return "-"
+
+    upper = nombre.upper()
+    if "ENCARGADO DE RUTA" in upper:
+        resto = upper.split("ENCARGADO DE RUTA", 1)[1].strip(" .-")
+        if resto:
+            return f"RUTA {resto}"
+
+    return nombre
+
+
 def _build_corte_reparto_lines(response_data):
     corte = response_data.get('corte_reparto') or {}
     encabezado = corte.get('encabezado') or {}
@@ -186,10 +208,10 @@ def _build_corte_reparto_lines(response_data):
         f"Unidad: {encabezado.get('unidad_codigo', '-') or '-'} - {encabezado.get('unidad_nombre', '-') or '-'}"
         f"   Placas: {encabezado.get('unidad_placas', '-') or '-'}"
     )
-    lines.append(
-        f"Encargado ruta: {encabezado.get('encargado_nombre', '-') or '-'}"
-        f"   Cajero cierre: {encabezado.get('empleado_caja_nombre', '-') or '-'}"
-    )
+    ruta_nombre = encabezado.get('ruta_nombre')
+    encargado_pdf = _usuario_reporte(encabezado.get('encargado_nombre'), ruta_nombre)
+    cajero_pdf = _usuario_reporte(encabezado.get('empleado_caja_nombre'), ruta_nombre)
+    lines.append(f"Encargado ruta: {encargado_pdf}   Cajero cierre: {cajero_pdf}")
     lines.append(
         f"Fecha salida: {_fmt_datetime(encabezado.get('fecha_reparto'))}"
         f"   Fecha cierre: {_fmt_datetime(encabezado.get('fecha_cierre'))}"
@@ -253,7 +275,7 @@ def _build_corte_reparto_lines(response_data):
             metodo = row.get('metodo_pago_nombre') or '-'
             monto = _fmt_money(row.get('monto'))
             referencia = (row.get('referencia') or '-')[:16]
-            usuario = (row.get('created_by_nombre') or '-')[:24]
+            usuario = _usuario_reporte(row.get('created_by_nombre'), ruta_nombre)[:24]
             lines.append(
                 f"{fecha[:18]:<18} {cliente[:28]:<28} {credito:<10} {metodo[:18]:<18} {monto:>12} {referencia:<16} {usuario:<24}"
             )
