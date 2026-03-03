@@ -103,7 +103,7 @@ Leyenda: **directo** (match claro), **parcial** (relación probable por módulo/
 - `d19c37e` · corte PDF backend · **directo**
 
 ### Punto 3 — Notificaciones de productos a vencer
-- **sin evidencia** *(existen commits de Notificaciones, pero no mencionan “vencer” explícitamente)*
+- **Cambio existente con ligeras mejoras** 
 
 ### Punto 4 — Consulta de inventario abierta
 - `1b1f422` · validar reparto por ruta + consulta global inventario · **directo**
@@ -159,7 +159,7 @@ Leyenda: **directo** (match claro), **parcial** (relación probable por módulo/
 - `6d55003` · totales con gastos · **directo**
 
 ### Punto 20 — Histórico de compras
-- **sin evidencia** *(existe `30e21f0` histórico por producto_id; no asegura “compras”)*
+- `e5e2c18` . GET /api/compras/historial-proveedores/ . **directo**
 
 ### Punto 21 — Quitar almacén origen
 - `8c48f17` · decimales + origen CEDIS · **parcial**
@@ -208,10 +208,6 @@ Conjunto de commits que no se justifica directamente con el Excel inicial; típi
 - Inventario lote/compra: robustez en cálculo de vencimiento
 - Traspaso: `select_for_update` + validación de inventario insuficiente
 
-### 4.3 Cruce con puntos del Excel
-- **directo**: 6, 8, 9, 13
-- **no principal**: 18 y 19 (más representados por `6278945` y `6d55003`)
-
 ---
 
 ## 5) Guía corta de pruebas (Postman / curl)
@@ -255,4 +251,4 @@ curl -X POST "$BASE_URL/<base_proveedor>/prelacion/"   -H "Authorization: Bearer
 ---
 
 ## Referencias
-- Documento interno. (s. f.). *Precio de venta* [PDF proporcionado por el usuario].
+- Documento interno. (s. f.). *Precio de venta*
