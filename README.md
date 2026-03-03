@@ -1,4 +1,4 @@
-# Arroyo Backend Fix — Historial de cambios (por commit) + Cruce de alcance
+# Arroyo Backend Fix — Historial de cambios (por commit) | Cruce de alcance
 
 > Fuente del histórico: `git log --reverse --pretty=format:"%h|%ad|%s" --date=short`  
 > Este documento organiza los commits por **bloques funcionales** y cruza el alcance original (**Excel inicial: 21 puntos**) contra los commits.
@@ -10,7 +10,6 @@
 ### 1.1 Inicialización y housekeeping
 - **2026-02-04** · `da99192` · Project upload
 - **2026-02-05** · `48aeb59` · security: ignorar .env
-- **2026-02-05** · `adf6b4f` · last fix *(mensaje genérico; usar diff si se requiere como evidencia)*
 - **2026-03-03** · `ee666e2` · docs: agregar recopilación de cambios por commit y guía de pruebas Postman
 
 ### 1.2 Compras / Órdenes de compra / Gastos
