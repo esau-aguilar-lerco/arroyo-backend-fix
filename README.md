@@ -93,102 +93,9 @@
 
 ---
 
-## 2) Cruce: 21 puntos solicitados vs commits
-Leyenda: **directo** (match claro), **parcial** (relación probable por módulo/flujo), **sin evidencia** (sin commit explícito por mensaje en el histórico).
+## 2) Commit destacado: `ad4a7e4` (NPF | 30, 18, 19, 23)
 
-### Punto 1 — Notas de venta de crédito / imprimir (Homero)
-- `82bbef8` · crédito-cliente sujeto a crédito · **parcial**
-
-### Punto 2 — Cierre de ruta / reporte cierre ($)
-- `d19c37e` · corte PDF backend · **directo**
-
-### Punto 3 — Notificaciones de productos a vencer
-- **Cambio existente con ligeras mejoras** 
-
-### Punto 4 — Consulta de inventario abierta
-- `1b1f422` · validar reparto por ruta + consulta global inventario · **directo**
-- `44d3c1a` · Inventario Almacen Consulta Api · **directo**
-
-### Punto 6 — Contado vs crédito (gestión pedidos/rutas)
-- `ad4a7e4` · NPF | 30, 18, 19, 23 · **directo**
-- `a5478e8` · ventas-caja compat + referencia · **parcial**
-
-### Punto 7 — Productos con precio (gestión pedidos)
-- `e878229` · visibilidad de precios + precio por tipo cliente (app) · **parcial**
-- `6a6aa35` · exponer precios calculados · **parcial**
-- `8fc78b5` · pedidos embarque + totalizadores · **parcial**
-
-### Punto 8 — Diferencias CEDIS vs concentrado por usuario
-- `ad4a7e4` · NPF | 30, 18, 19, 23 · **directo**
-- `1b1f422` · reparto por ruta + consulta inventario · **parcial**
-
-### Punto 9 — Transformación: merma no generaba
-- `ad4a7e4` · NPF | 30, 18, 19, 23 · **directo**
-
-### Punto 10 — Agrupar por proveedor (no líneas de crédito)
-- `c5bea97` · agrupado por proveedor · **directo**
-
-### Punto 11 — Comandera: pagado/adeudo/cambio
-- `a9848bd` · ventas comanda en listado · **parcial**
-- `c50b991` · filtro fase · **parcial**
-- `a5478e8` · compat fase app + referencia · **parcial**
-
-### Punto 12 — Referencia en pago a proveedores
-- `c5bea97` · referencia en pagos proveedor · **directo**
-
-### Punto 13 — Inventario no sincroniza al entrar abastecimientos (Homero)
-- `9db7327` · estabiliza entradas/abastecimiento · **directo**
-- `ad4a7e4` · NPF | 30, 18, 19, 23 · **directo**
-
-### Punto 14 — Aprobar abastecimiento CEDIS (punto de venta)
-- `8c48f17` · decimales + origen CEDIS · **directo**
-
-### Punto 15 — 'insidencias' → 'incidencias'
-- `bce8c87` · renombre completo · **directo**
-
-### Punto 16 — Saldo en OC al eliminar producto
-- `6d55003` · totales con gastos + override admin OC · **parcial**
-
-### Punto 17 — Compra directa: entrada duplica cantidad
-- `67d3ff3` · condición de carrera / duplicado · **directo**
-
-### Punto 18 — Tipificación de incidencias
-- `6278945` · tipificación vs descripción (bloqueo) · **directo**
-
-### Punto 19 — Gastos en total de OC
-- `6d55003` · totales con gastos · **directo**
-
-### Punto 20 — Histórico de compras
-- `e5e2c18` . GET /api/compras/historial-proveedores/ . **directo**
-
-### Punto 21 — Quitar almacén origen
-- `8c48f17` · decimales + origen CEDIS · **parcial**
-
----
-
-## 3) Cambios fuera de los 21 puntos (bloques no mapeados)
-Conjunto de commits que no se justifica directamente con el Excel inicial; típicamente corresponde a extensiones de alcance (app, embarque/reparto, idempotencia, PDF, pricing, prelación).
-
-### 3.1 Prelación + idempotencia (pagos)
-- `d522e79`, `ac64b4a`, `7aaa172`, `3335156`
-
-### 3.2 App / embarque / reparto / ruta-app (flujo completo)
-- `a92ccca`, `29769c7`, `941e05a`, `e50ddda`, `f0e10d1`, `3e23242`, `7a5dbef`, `76ec81b`, `afe4ac4`, `8fc78b5`, `a3d1c8e`, `fafe206`, `e2c53b6`, etc.
-
-### 3.3 PDF (corte)
-- `d19c37e`, `ecd90ef`
-
-### 3.4 Pricing / reglas / exposición de precios
-- `5e47b1d`, `6a6aa35`, `7dd8713`, `5ade6a7`, `e878229`
-
-### 3.5 Traspasos (robustez/concurrencia)
-- `c0e612d`, `4ac36d3`, `3b2c135`, `0b995b2`, `5286e9d`
-
----
-
-## 4) Commit destacado: `ad4a7e4` (NPF | 30, 18, 19, 23)
-
-### 4.1 Archivos tocados
+### 2.1 Archivos tocados
 - `.gitignore`
 - `apps/erp/api/embarque_view.py`
 - `apps/erp/migrations/0086_compra_fecha_vencimiento.py`
@@ -200,7 +107,7 @@ Conjunto de commits que no se justifica directamente con el Excel inicial; típi
 - `apps/inventario/services/entradas.py`
 - `apps/usuarios/api/auth_views.py`
 
-### 4.2 Cambios funcionales (resumen)
+### 2.2 Cambios funcionales (resumen)
 - Gestión de pedidos/rutas: `listar_preventas_con_detalles_carga` resuelve el almacén desde la ruta (`almacen_embarque`) y no desde `user.almacen`
 - Ventas (serializer): inclusión de `condicion_pago` para distinguir contado/crédito en listados
 - Transformaciones/merma: asignación FIFO automática de lotes en merma cuando no llegan lotes explícitos + validaciones de stock
@@ -210,12 +117,12 @@ Conjunto de commits que no se justifica directamente con el Excel inicial; típi
 
 ---
 
-## 5) Guía corta de pruebas (Postman / curl)
+## 3) Guía corta de pruebas (Postman / curl)
 
-### 5.1 Autenticación
+### 3.1 Autenticación
 - `POST /api/token/` (JWT)
 
-### 5.2 Prelación (pagos crédito)
+### 3.2 Prelación (pagos crédito)
 - `POST /api/pagos-credito/*/prelacion/` + header `Idempotency-Key`
 
 Ejemplo:
@@ -223,30 +130,11 @@ Ejemplo:
 curl -X POST "$BASE_URL/<base_proveedor>/prelacion/"   -H "Authorization: Bearer $TOKEN"   -H "Content-Type: application/json"   -H "Idempotency-Key: <uuid>"   -d '{"proveedor":123,"cantidad_pagar":"1500.00","metodo_pago":"TRANSFERENCIA","referencia":"FOLIO-ABC-123"}'
 ```
 
-### 5.3 Docs
+### 3.3 Docs
 - `GET /api/docs/`
 
-### 5.4 Historial de ventas entregadas (app)
+### 3.4 Historial de ventas entregadas (app)
 - `GET /api/embarques-reparto/historial-ventas/`
-
----
-
-## 6) Tabla de alcance (Excel vs extras)
-
-| Bloque | Incluido en Excel 21 puntos | Commits clave | Nota |
-|---|---:|---|---|
-| Correcciones de compras/OC (gastos/override/flujo) | Sí | `6d55003`, `0ca8ad5` | Impacta totales y consistencia |
-| Abastecimiento/origen CEDIS/decimales | Sí (14/21 parcial) | `8c48f17` | Origen/decimales y ajustes asociados |
-| Tipificación incidencias | Sí | `6278945` | Desbloqueo por mismatch tipificación/desc |
-| Renombre insidencia→incidencia | Sí | `bce8c87` | Normalización de nomenclatura |
-| Compra directa duplicada (condición de carrera) | Sí | `67d3ff3` | Bug crítico de inventario/entradas |
-| Consulta de inventario abierta | Sí | `1b1f422`, `44d3c1a` | Endpoints/consulta global |
-| Prelación + idempotencia (pagos) | No (EXTRA) | `d522e79`, `ac64b4a`, `7aaa172`, `3335156` | Endpoint nuevo + robustez concurrente |
-| Flujo embarque/reparto/ruta-app | No (EXTRA) | `a92ccca`, `29769c7`, `e50ddda`, `3e23242`, `7a5dbef`, etc. | Módulo operativo adicional |
-| PDF (corte) | No (EXTRA) | `d19c37e`, `ecd90ef` | Generación y normalización |
-| Pricing global (reglas, exposición, ponderados) | No (EXTRA) | `5e47b1d`, `6a6aa35`, `7dd8713`, `5ade6a7`, `e878229` | Lógica core de precios |
-| Abonos globales editar/cancelar por pago_id | No (EXTRA) | `7c55280`, `fa6ffa3` | Administración de pagos globales |
-| App/API handoff (Ionic) | No (EXTRA) | `d69b522`, merges app | Contratos para consumo móvil |
 
 ---
 
